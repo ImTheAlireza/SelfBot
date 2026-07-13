@@ -20,7 +20,6 @@ A feature-rich, asynchronous Telegram self-bot built with Telethon. It automates
     -   **Stickers**: Create text-based stickers on the fly (`stick`) and manage them in personal sticker packs (`stickerpack`).
 -   **Search & Download**:
     -   Search Anna's Archive for books (`annas`) and articles (`art`).
-    -   Download resources directly using a simple command (`dl_...`).
 -   **Information & Utilities**:
     -   Fetch detailed user information, including profile pictures/videos (`info`).
     -   Get daily and hourly weather forecasts (`dw`, `hw`).
