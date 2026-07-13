@@ -1,75 +1,59 @@
-from telethon import TelegramClient, events, functions, types
-from telethon.tl.functions.users import GetFullUserRequest
-from telethon.tl.types import DocumentAttributeVideo, DocumentAttributeSticker, InputStickerSetEmpty, DocumentAttributeAudio
-from telethon.errors.rpcerrorlist import MessageNotModifiedError
-from telethon.errors import ChatWriteForbiddenError, MessageDeleteForbiddenError, FloodWaitError
+import asyncio, os, io, re, json, time, math, uuid, base64, hashlib, traceback
+import logging, subprocess, shutil, textwrap, zipfile
+import requests, aiohttp, pytz, pymysql, pyzipper, qrcode, PyPDF2
+import arabic_reshaper
 
-import asyncio
-import os
-import requests
-import logging
-import subprocess
-import pytz
-import math
-import json
-import base64
-import zipfile
-import pyzipper
-import io
-import re
-import uuid
-import time
-import pymysql
-import PyPDF2
-import aiohttp
-import shutil 
-import qrcode
-import io
-
-
-from datetime import datetime, timedelta 
-from geopy.geocoders import Nominatim
-from PIL import Image
-from mutagen.easyid3 import EasyID3
-from mutagen.mp3 import MP3
+from datetime import datetime, timedelta
+from typing import Dict, Optional, List
 from io import BytesIO
-from cachetools import TTLCache
 from contextlib import contextmanager
 from functools import wraps
+
+from telethon import TelegramClient, events, functions, types, Button
+from telethon.tl.functions.users import GetFullUserRequest
+from telethon.tl.types import (DocumentAttributeVideo, DocumentAttributeSticker,
+                               InputStickerSetEmpty, DocumentAttributeAudio)
+from telethon.errors.rpcerrorlist import MessageNotModifiedError
+from telethon.errors import (ChatWriteForbiddenError, MessageDeleteForbiddenError,
+                             FloodWaitError)
+
+from geopy.geocoders import Nominatim
 from bs4 import BeautifulSoup
+from PIL import Image, ImageDraw, ImageFont
+from mutagen.mp3 import MP3
 from mutagen.mp4 import MP4
 from mutagen.flac import FLAC
+from mutagen.easyid3 import EasyID3
 from mutagen.oggvorbis import OggVorbis
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-import arabic_reshaper
 from bidi.algorithm import get_display
-from PIL import Image
-import numpy as np
-from PIL import Image
+
+
 
 
 # Configuration
 TELEGRAM_CONFIG = {
-    'api_id': '*********',
-    'api_hash': '********************************',
-    'phone_number': '+**************',
+    'api_id': '********',
+    'api_hash': '*************************',
+    'phone_number': '+************',
     'session_name': 'selfbot'
 }
 
 BOT_CONFIG = {
     'active': True,
-    'spam_delay': 0,
-    'spam_limit': 1000,
+    'spam_delay': 1.5,
+    'spam_limit': 50,
     'spam_cooldown': 4,
-    'sudo_user_id': ************
+    'sudo_user_id': *********,
 }
 
+
 API_KEYS = {
-    'rapidapi': os.getenv('RAPIDAPI_KEY', '******************************'),
-    'coinmarketcap': os.getenv('COINMARKETCAP_KEY', '********************************************')
+    'rapidapi': os.getenv('RAPIDAPI_KEY', '*******************************'),
+    'coinmarketcap': os.getenv('COINMARKETCAP_KEY', '*******************************')
 }
 
 API_ENDPOINTS = {
@@ -112,6 +96,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 client = TelegramClient(TELEGRAM_CONFIG['session_name'], TELEGRAM_CONFIG['api_id'], TELEGRAM_CONFIG['api_hash'])
 geolocator = Nominatim(user_agent='weather-bot')
+active_sticker_pack = None
+
 
 # Global variables
 bot_active = BOT_CONFIG['active']
@@ -119,13 +105,32 @@ spam_delay = BOT_CONFIG['spam_delay']
 spam_limit = BOT_CONFIG['spam_limit']
 spam_cooldown = BOT_CONFIG['spam_cooldown']
 SUDO_USER_ID = BOT_CONFIG['sudo_user_id']
+LOG_CHANNEL_ID = -************
+SUPERVISOR_CONFIG = '/home/selfnit4/supervisord.conf'
+SUPERVISOR_PROCESS = 'selfbot'
+FONT_PATH = os.path.join(os.path.dirname(__file__), "fonts", "Vazirmatn-Regular.ttf")
+STICKER_BOT_TOKEN = "****************************************"
+STICKER_BOT_USERNAME = "selfstickerhelperbot"
+
 
 user_waitlists = {}
 active_spam_tasks = {}
-confirmation_cache = TTLCache(maxsize=100, ttl=300)
 last_spam_time = {}
 previous_prices = {}
 currency_task = None
+active_timer_tasks: Dict[str, dict] = {}
+restart_confirmations = {}
+_emoji_cache: Dict[str, str] = {}
+_emoji_cache_ts: float = 0.0
+EMOJI_CACHE_TTL = 300  # seconds
+
+# Number to styled number mapping
+STYLED_NUMBERS = {
+    '0': '𝟬', '1': '𝟭', '2': '𝟮', '3': '𝟯', '4': '𝟰',
+    '5': '𝟱', '6': '𝟲', '7': '𝟳', '8': '𝟴', '9': '𝟵',
+}
+
+
 
 CURRENCY_CHANNEL = "@CurrencyPriceUpdates"
 GPT_HEADERS = API_ENDPOINTS['gpt']['headers']
@@ -138,6 +143,111 @@ RAPIDAPI_KEY = API_KEYS['rapidapi']
 
 ##-------------------------------------COMMAND HANDLER--------------------------------------##
 
+class TelegramLogHandler(logging.Handler):
+    """Handler to send logs to Telegram channel."""
+    
+    MAX_MESSAGE_LENGTH = 4000
+    
+    def __init__(self, client, chat_id: int):
+        super().__init__()
+        self.client = client
+        self.chat_id = chat_id
+        self.message_queue = []
+        self.is_sending = False
+        self.loop = None
+
+    def _split_message(self, text: str) -> List[str]:
+        """Split long message into parts."""
+        if len(text) <= self.MAX_MESSAGE_LENGTH:
+            return [text]
+        
+        parts = []
+        current_part = ""
+        lines = text.split('\n')
+        
+        for line in lines:
+            if len(line) > self.MAX_MESSAGE_LENGTH:
+                if current_part:
+                    parts.append(current_part)
+                    current_part = ""
+                
+                for i in range(0, len(line), self.MAX_MESSAGE_LENGTH - 50):
+                    chunk = line[i:i + self.MAX_MESSAGE_LENGTH - 50]
+                    parts.append(chunk)
+                continue
+            
+            if len(current_part) + len(line) + 1 > self.MAX_MESSAGE_LENGTH:
+                if current_part:
+                    parts.append(current_part)
+                current_part = line
+            else:
+                if current_part:
+                    current_part += '\n' + line
+                else:
+                    current_part = line
+        
+        if current_part:
+            parts.append(current_part)
+        
+        return parts
+
+    def emit(self, record):
+        """Send log to Telegram."""
+        try:
+            log_entry = self.format(record)
+            message_parts = self._split_message(log_entry)
+            
+            if len(message_parts) > 1:
+                for i, part in enumerate(message_parts, 1):
+                    header = f"📄 Part {i}/{len(message_parts)}\n{'─' * 30}\n"
+                    self._queue_message(header + part)
+            else:
+                self._queue_message(message_parts[0])
+                
+        except Exception as e:
+            print(f"Failed to send log to Telegram: {e}")
+
+    def _queue_message(self, message: str):
+        self.message_queue.append(message)
+        if not self.is_sending:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._process_queue())
+            except RuntimeError:
+                pass
+
+    async def _process_queue(self):
+        """Process message queue."""
+        if self.is_sending:
+            return
+        
+        self.is_sending = True
+        try:
+            while self.message_queue:
+                message = self.message_queue.pop(0)
+                try:
+                    await self.client.send_message(
+                        self.chat_id,
+                        message
+                    )
+                    await asyncio.sleep(0.3)
+                except Exception as e:
+                    print(f"Telegram send error: {e}")
+        finally:
+            self.is_sending = False
+
+def setup_telegram_logging():
+    """Setup Telegram log handler."""
+    telegram_handler = TelegramLogHandler(client, LOG_CHANNEL_ID)
+    telegram_handler.setLevel(logging.DEBUG)
+    
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    telegram_handler.setFormatter(formatter)
+    
+    logger.addHandler(telegram_handler)
+    
+    return telegram_handler
+
 @contextmanager
 def get_db_cursor():
     """Context manager for database connections."""
@@ -146,8 +256,8 @@ def get_db_cursor():
         conn = pymysql.connect(
             host=os.getenv('DB_HOST', 'localhost'),
             user=os.getenv('DB_USER', '*************'),
-            password=os.getenv('DB_PASSWORD', '************'),
-            database=os.getenv('DB_NAME', '*************'),
+            password=os.getenv('DB_PASSWORD', '**************'),
+            database=os.getenv('DB_NAME', '**************'),
             charset="utf8mb4",
             cursorclass=pymysql.cursors.DictCursor,
             autocommit=True
@@ -228,6 +338,47 @@ def initialize_qreply_table():
         logger.exception("❌ Failed to initialize quick reply table")
 
 
+def initialize_timer_table():
+    """Initialize timer table in database."""
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS timers (
+                    hash VARCHAR(8) PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    chat_id BIGINT NOT NULL,
+                    title VARCHAR(255) NOT NULL,
+                    duration_seconds INT NOT NULL,
+                    end_time DATETIME NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    message_id BIGINT DEFAULT NULL,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    INDEX idx_user_id (user_id),
+                    INDEX idx_is_active (is_active),
+                    INDEX idx_end_time (end_time)
+                ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+            """)
+            logger.info("✅ Timer table initialized")
+    except Exception as e:
+        logger.exception("❌ Failed to initialize timer table")
+
+
+def initialize_sticker_packs_table():
+    """Initialize sticker packs table."""
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS sticker_packs (
+                    name VARCHAR(64) PRIMARY KEY,
+                    title VARCHAR(255) NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+            """)
+            logger.info("✅ Sticker packs table initialized")
+    except Exception as e:
+        logger.exception("❌ Failed to initialize sticker packs table")
+
+
 def is_authorized(event):
     """Check if user is authorized."""
     if event.message.out:
@@ -261,6 +412,9 @@ def sudo_only(func):
 initialize_admin_table()
 initialize_emoji_table()
 initialize_qreply_table()
+initialize_timer_table()
+initialize_sticker_packs_table()
+
 
 @sudo_only
 async def handle_setadmin(event, *args):
@@ -346,20 +500,63 @@ async def handle_adminlist(event, *args):
         
         
 @sudo_only
-async def handle_self_command(event, command):
-    """Toggle bot active state."""
+async def handle_self_command(event, *args):
+    """Handle self commands: on, off, restart, status, logs."""
     global bot_active
+    
+    if not args:
+        return await event.reply(
+            "❌ **Usage:**\n"
+            "`self on` - Activate bot\n"
+            "`self off` - Deactivate bot\n"
+            "`self restart` - Restart bot\n"
+            "`self status` - Check status\n"
+            "`self logs [n]` - View last n logs"
+        )
+    
+    command = args[0].lower()
+    sub_args = args[1:] if len(args) > 1 else []
     
     if command == 'on':
         bot_active = True
         await event.reply("✅ Self-bot is now active.")
+    
     elif command == 'off':
         bot_active = False
         await event.reply("❌ Self-bot is now deactivated.")
+    
+    elif command == 'restart':
+        await handle_self_restart(event, *sub_args)
+    
+    elif command == 'status':
+        await handle_self_status(event, *sub_args)
+    
+    elif command == 'logs':
+        await handle_self_logs(event, *sub_args)
+    
     else:
-        await event.reply("❌ Invalid command. Use: `on` or `off`")
+        await event.reply(
+            f"❌ Unknown command: `{command}`\n\n"
+            "Available: `on`, `off`, `restart`, `status`, `logs`"
+        )
         
-        
+
+async def safe_spam(client, entity, text, count, delay):
+    sent = 0
+    for _ in range(min(count, BOT_CONFIG['spam_limit'])):
+        try:
+            await client.send_message(entity, text)
+            sent += 1
+            await asyncio.sleep(delay)
+        except FloodWaitError as e:
+            logger.warning(f"FloodWait: sleeping {e.seconds}s")
+            await asyncio.sleep(e.seconds + 1)
+        except ChatWriteForbiddenError:
+            logger.error("Write forbidden in this chat; aborting.")
+            break
+    return sent
+
+
 async def handle_spam(event, *args):
     """Send a message multiple times with configurable delay."""
     global spam_limit, spam_delay, spam_cooldown
@@ -504,17 +701,18 @@ async def handle_del(event, arg):
     """Delete messages by count or type with confirmation for bulk operations."""
     
     TYPE_MAP = {
-        "sticker": "sticker",
-        "photos": "photo",
-        "videos": "video",
-        "voices": "voice",
+        "sticker":   "sticker",
+        "photos":    "photo",
+        "videos":    "video",
+        "voices":    "voice",
         "videomsgs": "video_note",
-        "musics": "audio",
-        "files": "document",
-        "links": "webpage",
-        "gifs": "gif",
-        "all": "all"
+        "musics":    "audio",
+        "files":     "document",
+        "links":     "web_preview",   # was "webpage" — non-existent attribute
+        "gifs":      "gif",
+        "all":       "all"
     }
+
     
     messages_to_delete = []
 
@@ -765,9 +963,21 @@ async def handle_user_help(event):
         "`dic [word]` - Get definition\n"
         "Shows: English & Persian meanings, examples, pronunciation\n\n"
         
+        "**Timer**\n"
+        "`settimer [duration] [title]` - Set timer\n"
+        "`activetimers` - List active timers\n"
+        "`/dismiss_[hash]` - Cancel timer\n"
+        "`/resend_[hash]` - Resend timer message\n\n"
+
+        "**Duration formats:**\n"
+        "• `MM:SS` - 15:30 (15m 30s)\n"
+        "• `HH:MM:SS` - 1:15:30 (1h 15m 30s)\n"
+        "• `DD:HH:MM:SS` - 2:12:15:30 (2d 12h 15m 30s)\n\n"
+        
     )
 
     await event.reply(help_text)
+
 
 def backup_database(event, args, session):
     """Create database backup as SQL dump."""
@@ -1002,7 +1212,7 @@ async def handle_daily_weather(event, *args):
     loading_msg = await event.reply("⏳ Getting forecast...")
 
     try:
-        lat, lon = await asyncio.get_event_loop().run_in_executor(None, get_lat_lon, city_name)
+        lat, lon = await asyncio.get_running_loop().run_in_executor(None, get_lat_lon, city_name)
         
         if lat is None or lon is None:
             return await loading_msg.edit(f"⚠️ Could not find location for {city_name}.")
@@ -1027,21 +1237,22 @@ async def handle_hourly_weather(event, *args):
     loading_msg = await event.reply("⏳ Getting forecast...")
 
     try:
-        lat, lon = await asyncio.get_event_loop().run_in_executor(None, get_lat_lon, city_name)
-        
+        lat, lon = await asyncio.get_running_loop().run_in_executor(None, get_lat_lon, city_name)
+
         if lat is None or lon is None:
             return await loading_msg.edit(f"⚠️ Could not find location for {city_name}.")
 
-        forecast = await asyncio.get_event_loop().run_in_executor(
+        forecast = await asyncio.get_running_loop().run_in_executor(
             None, get_hourly_weather, city_name, lat, lon
         )
-        
+
         await loading_msg.delete()
         await send_long_message(event, forecast)
 
     except Exception as e:
         logger.error(f"Error in handle_hourly_weather: {str(e)}")
         await loading_msg.edit("⚠️ Error fetching hourly weather.")
+
 
 
 async def send_long_message(event, text, max_length=4096):
@@ -1101,7 +1312,6 @@ def get_weather_emoji(description):
     return "🌡️"
     
     
-
 async def handle_currency(event):
     """Fetch and display current prices for currency, gold, and coins."""
     url = "https://www.tgju.org/"
@@ -1332,19 +1542,18 @@ async def download_media(url, file_path, progress_message):
         raise
 
 
+_upload_trackers: Dict[int, ProgressTracker] = {}
 async def update_upload_progress(current, total, progress_message):
     """Enhanced upload progress with detailed statistics."""
-    if not hasattr(update_upload_progress, "tracker"):
-        update_upload_progress.tracker = ProgressTracker()
-    
-    tracker = update_upload_progress.tracker
+    msg_id = progress_message.id
+    tracker = _upload_trackers.setdefault(msg_id, ProgressTracker())
+
     percent = math.floor((current / total) * 100)
-    
+
     if tracker.should_update(percent, min_interval=1.5, min_percent_change=5):
         speed = tracker.get_speed(current)
         eta = tracker.get_eta(current, total)
         progress_bar = create_progress_bar(percent)
-        
         status_msg = (
             f"⬆️ **Uploading...**\n\n"
             f"{progress_bar} {percent}%\n"
@@ -1352,22 +1561,19 @@ async def update_upload_progress(current, total, progress_message):
             f"⚡ Speed: {speed:.2f} MB/s\n"
             f"⏱ ETA: {eta}"
         )
-        
         await safe_edit_message(progress_message, status_msg, tracker)
-    
+
     if current >= total:
         elapsed = tracker.format_time(time.time() - tracker.start_time)
         avg_speed = tracker.get_speed(current)
-        
         complete_msg = (
             f"✅ **Upload complete!**\n\n"
             f"📦 Size: {tracker.format_size(total)}\n"
             f"⚡ Avg speed: {avg_speed:.2f} MB/s\n"
             f"⏱ Total time: {elapsed}"
         )
-        
         await safe_edit_message(progress_message, complete_msg)
-        delattr(update_upload_progress, "tracker")
+        _upload_trackers.pop(msg_id, None)
 
 
 def create_progress_bar(percent, length=10):
@@ -1435,10 +1641,12 @@ async def handle_tts(event):
             "Content-Type": "application/json"
         }
         
-        response = await asyncio.get_event_loop().run_in_executor(
+        response = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: requests.post(url, json=payload, headers=headers, timeout=30)
         )
+
+        
         response.raise_for_status()
         
         response_data = response.json()
@@ -2197,50 +2405,43 @@ async def handle_book_download_by_md5(event, book_id):
     try:
         progress_message = await event.reply("⬇️ Downloading... (0%)")
 
-        # API request
         main_url = "https://annas-archive-api.p.rapidapi.com/download"
-        main_querystring = {"md5": book_id}
         main_headers = {
             "x-rapidapi-key": RAPIDAPI_KEY,
             "x-rapidapi-host": "annas-archive-api.p.rapidapi.com"
         }
 
-        response = requests.get(main_url, headers=main_headers, params=main_querystring, timeout=20)
+        response = requests.get(main_url, headers=main_headers, params={"md5": book_id}, timeout=20)
         data = response.json()
 
         if response.status_code == 200 and data:
-            # Get download URL
             download_url = data[1] if len(data) > 1 else data[0] if data else None
 
             if not download_url or not download_url.startswith("http"):
                 raise ValueError("Invalid download URL")
 
             media_name = f"book_{book_id}.pdf"
-
-            # Download
             await download_media(download_url, media_name, progress_message)
 
-            # Send file
+            async def _upload_progress(current, total):
+                await update_upload_progress(current, total, progress_message)
+
             await event.client.send_file(
                 event.chat_id,
                 media_name,
-                progress_callback=lambda current, total: update_upload_progress(
-                    current, total, progress_message
-                ),
+                progress_callback=_upload_progress,
             )
 
-            # Cleanup
             if os.path.exists(media_name):
                 os.remove(media_name)
 
             await progress_message.delete()
-
         else:
             await progress_message.edit("❌ Failed to get valid response.")
 
     except Exception as e:
         logger.error(f"Download failed: {str(e)}")
-        await progress_message.edit(f"❌ Download failed. {str(e)}")
+        await progress_message.edit(f"❌ Download failed: {str(e)}")
 
 
 async def handle_article_search(event, *args):
@@ -2289,13 +2490,12 @@ async def handle_article_search(event, *args):
         
 async def handle_split(event, *args):
     """Split PDF pages by range (e.g., split 2-5)."""
-    
+
     if not args:
         return await event.reply("❌ Usage: split start_page-end_page (e.g., 'split 2-5')")
 
     page_range_str = args[0]
 
-    # Validate format
     match = re.match(r'^(\d+)-(\d+)$', page_range_str)
     if not match:
         return await event.reply(f"❌ Invalid page range format: {page_range_str}. Use 'start_page-end_page' (e.g., '2-5').")
@@ -2311,9 +2511,8 @@ async def handle_split(event, *args):
     if not reply.document or reply.document.mime_type != 'application/pdf':
         return await event.reply("❌ Please reply to a valid PDF file.")
 
-    # Progress tracking
     last_download_update = 0
-    
+
     async def download_progress(current, total):
         nonlocal last_download_update
         percent = int(current * 100 / total) if total else 0
@@ -2326,7 +2525,6 @@ async def handle_split(event, *args):
 
     progress_message = await event.reply("⬇️ Downloading PDF... 0%")
 
-    # Download PDF to memory
     input_stream = io.BytesIO()
     await event.client.download_media(reply, file=input_stream, progress_callback=download_progress)
     input_stream.seek(0)
@@ -2334,33 +2532,32 @@ async def handle_split(event, *args):
     await progress_message.edit("✂️ Splitting PDF...")
 
     try:
-        loop = asyncio.get_event_loop()
-        
         def split_bytes(data_bytes):
             reader = PyPDF2.PdfReader(io.BytesIO(data_bytes))
             total = len(reader.pages)
             s_idx, e_idx = start - 1, end - 1
-            
+
             if s_idx < 0 or e_idx >= total:
                 raise ValueError(f"Pages {start}-{end} out of bounds (1-{total})")
-            
+
             writer = PyPDF2.PdfWriter()
             for i in range(s_idx, e_idx + 1):
                 writer.add_page(reader.pages[i])
-            
+
             out = io.BytesIO()
             writer.write(out)
             out.seek(0)
             return out
 
-        output_stream = await loop.run_in_executor(None, split_bytes, input_stream.read())
+        output_stream = await asyncio.get_running_loop().run_in_executor(
+            None, split_bytes, input_stream.read()
+        )
 
         filename = f"split_{start}_{end}_{uuid.uuid4().hex}.pdf"
         output_stream.name = filename
 
-        # Upload progress
         last_upload_update = 0
-        
+
         async def upload_progress(current, total):
             nonlocal last_upload_update
             percent = int(current * 100 / total) if total else 0
@@ -2372,12 +2569,12 @@ async def handle_split(event, *args):
                     pass
 
         await event.client.send_file(
-            event.chat_id, 
-            output_stream, 
-            caption=f"✅ PDF has been split successfully! (Pages {start}-{end})", 
+            event.chat_id,
+            output_stream,
+            caption=f"✅ PDF has been split successfully! (Pages {start}-{end})",
             progress_callback=upload_progress
         )
-        
+
         await progress_message.delete()
 
     except ValueError as e:
@@ -2386,52 +2583,8 @@ async def handle_split(event, *args):
     except Exception as e:
         logger.exception("Error splitting PDF")
         await progress_message.edit(f"❌ An error occurred: {str(e)}")
+
         
-        
-@sudo_only
-async def handle_setemoji(event, *args):
-    """Set auto-reaction emoji for a channel."""
-    if len(args) < 2:
-        return await event.reply("❌ Usage: setreact @channelusername [emoji]")
-
-    channel_username = args[0].lstrip('@')
-    emoji = args[1]
-
-    try:
-        with get_db_cursor() as cur:
-            cur.execute(
-                "REPLACE INTO channel_emojis (channel_username, emoji) VALUES (%s, %s)", 
-                (channel_username, emoji)
-            )
-        
-        await event.reply(f"✅ Emoji '{emoji}' set for channel @{channel_username}.")
-        logger.info(f"Emoji '{emoji}' set for @{channel_username}")
-        
-    except Exception as e:
-        logger.exception("Error setting emoji for channel")
-        await event.reply(f"❌ Error: {e}")
-
-
-@sudo_only
-async def handle_remreact(event, *args):
-    """Remove auto-reaction for a channel."""
-    if len(args) < 1:
-        return await event.reply("❌ Usage: remreact @channelusername")
-
-    channel_username = args[0].lstrip('@')
-
-    try:
-        with get_db_cursor() as cur:
-            cur.execute("DELETE FROM channel_emojis WHERE channel_username = %s", (channel_username,))
-        
-        await event.reply(f"✅ Emoji removed for channel @{channel_username}.")
-        logger.info(f"Emoji removed for @{channel_username}")
-        
-    except Exception as e:
-        logger.exception("Error removing emoji for channel")
-        await event.reply(f"❌ Error: {e}")
-
-
 @sudo_only
 async def handle_reactlist(event, *args):
     """List all configured auto-reactions."""
@@ -2454,45 +2607,100 @@ async def handle_reactlist(event, *args):
 @client.on(events.NewMessage(chats=None))
 async def apply_emoji(event):
     """Automatically apply emoji reactions to channel messages."""
-    if event.chat and event.chat.username:
-        channel_username = event.chat.username
-        
-        with get_db_cursor() as cur:
-            cur.execute("SELECT emoji FROM channel_emojis WHERE channel_username = %s", (channel_username,))
-            result = cur.fetchone()
+    global _emoji_cache, _emoji_cache_ts
 
-        if result:
-            emoji = result['emoji']
-            try:
-                await client(functions.messages.SendReactionRequest(
-                    peer=event.chat_id,
-                    msg_id=event.message.id,
-                    reaction=[types.ReactionEmoji(emoticon=emoji)]
-                ))
-                logger.debug(f"✅ Emoji '{emoji}' applied to message in @{channel_username}")
-                
-            except ChatWriteForbiddenError:
-                logger.error(f"❌ Bot lacks permissions to react in @{channel_username}")
-            except Exception as e:
-                logger.error(f"❌ Failed to apply emoji: {e}")
-                
+    if not (event.chat and event.chat.username):
+        return
+
+    # Refresh cache every EMOJI_CACHE_TTL seconds
+    now = time.time()
+    if now - _emoji_cache_ts > EMOJI_CACHE_TTL:
+        try:
+            with get_db_cursor() as cur:
+                cur.execute("SELECT channel_username, emoji FROM channel_emojis")
+                rows = cur.fetchall()
+            _emoji_cache = {r['channel_username']: r['emoji'] for r in rows}
+            _emoji_cache_ts = now
+        except Exception as e:
+            logger.error(f"Failed to refresh emoji cache: {e}")
+            return
+
+    emoji = _emoji_cache.get(event.chat.username)
+    if not emoji:
+        return
+
+    try:
+        await client(functions.messages.SendReactionRequest(
+            peer=event.chat_id,
+            msg_id=event.message.id,
+            reaction=[types.ReactionEmoji(emoticon=emoji)]
+        ))
+        logger.debug(f"✅ Emoji '{emoji}' applied in @{event.chat.username}")
+    except ChatWriteForbiddenError:
+        logger.error(f"❌ No permission to react in @{event.chat.username}")
+    except Exception as e:
+        logger.error(f"❌ Failed to apply emoji: {e}")
+
+
+def _invalidate_emoji_cache():
+    global _emoji_cache_ts
+    _emoji_cache_ts = 0.0
+
+
+@sudo_only
+async def handle_setemoji(event, *args):
+    """Set auto-reaction emoji for a channel."""
+    if len(args) < 2:
+        return await event.reply("❌ Usage: setreact @channelusername [emoji]")
+
+    channel_username = args[0].lstrip('@')
+    emoji = args[1]
+
+    try:
+        with get_db_cursor() as cur:
+            cur.execute(
+                "REPLACE INTO channel_emojis (channel_username, emoji) VALUES (%s, %s)",
+                (channel_username, emoji)
+            )
+        _invalidate_emoji_cache()
+        await event.reply(f"✅ Emoji '{emoji}' set for @{channel_username}.")
+        logger.info(f"Emoji '{emoji}' set for @{channel_username}")
+    except Exception as e:
+        logger.exception("Error setting emoji for channel")
+        await event.reply(f"❌ Error: {e}")
+
+
+@sudo_only
+async def handle_remreact(event, *args):
+    """Remove auto-reaction for a channel."""
+    if len(args) < 1:
+        return await event.reply("❌ Usage: remreact @channelusername")
+
+    channel_username = args[0].lstrip('@')
+
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("DELETE FROM channel_emojis WHERE channel_username = %s", (channel_username,))
+        _invalidate_emoji_cache()
+        await event.reply(f"✅ Emoji removed for @{channel_username}.")
+        logger.info(f"Emoji removed for @{channel_username}")
+    except Exception as e:
+        logger.exception("Error removing emoji for channel")
+        await event.reply(f"❌ Error: {e}")
+   
                 
 def find_vazirmatn_font():
-    """Find Vazirmatn font file for Persian support."""
-    font_paths = [
+    """Find Vazirmatn font file."""
+    paths = [
         'fonts/Vazirmatn-Regular.ttf',
         'fonts/Vazirmatn.ttf',
         './Vazirmatn-Regular.ttf',
         '/usr/share/fonts/truetype/vazirmatn/Vazirmatn-Regular.ttf',
         os.path.join(os.path.dirname(__file__), 'fonts', 'Vazirmatn-Regular.ttf'),
     ]
-    
-    for font_path in font_paths:
-        if os.path.exists(font_path):
-            logger.info(f"✅ Found Vazirmatn font: {font_path}")
-            return font_path
-    
-    logger.warning("⚠️ Vazirmatn font not found")
+    for path in paths:
+        if os.path.exists(path):
+            return path
     return None
 
 
@@ -2556,11 +2764,11 @@ def process_persian_text(text):
         return text
 
 
-def has_persian_characters(text):
+def has_persian_characters(text: str) -> bool:
     """Check if text contains Persian/Arabic characters."""
-    return any('\u0600' <= ch <= '\u06FF' for ch in text)
-
-
+    return any('\u0600' <= ch <= '\u06FF' or '\u0750' <= ch <= '\u077F' or '\u08A0' <= ch <= '\u08FF' for ch in text)
+    
+    
 def create_pdf_from_text(text, filename, language="en", font_size=12):
     """
     Create PDF from text with English or Persian support.
@@ -2656,70 +2864,47 @@ def create_pdf_from_text(text, filename, language="en", font_size=12):
 
 
 async def handle_text_to_pdf(event, *args):
-    """
-    Convert replied text to PDF with English or Persian support.
-    
-    Usage:
-      - topdf en [size]  - English PDF (default font size: 12)
-      - topdf fa [size]  - Persian PDF (default font size: 12)
-      - topdf [size]     - Auto-detect language
-    
-    Examples:
-      - topdf en
-      - topdf fa
-      - topdf en 14
-      - topdf fa 16
-      - topdf
-    """
-    
-    # Validation
+
     if not event.is_reply:
         return await event.reply("❌ Please reply to a text message.")
 
     reply_msg = await event.get_reply_message()
     text_content = reply_msg.raw_text
-    
+
     if not text_content or not text_content.strip():
         return await event.reply("❌ Message is empty.")
 
-    # Parse arguments
     language = None
     font_size = 12
-    
+
     if args:
-        # Check first argument
         first_arg = args[0].lower()
-        
+
         if first_arg in ["en", "english"]:
             language = "en"
-            # Check for font size
             if len(args) > 1:
                 try:
                     font_size = int(args[1])
                 except ValueError:
                     return await event.reply("❌ Invalid font size. Please provide a number.")
-        
+
         elif first_arg in ["fa", "persian"]:
             language = "fa"
-            # Check for font size
             if len(args) > 1:
                 try:
                     font_size = int(args[1])
                 except ValueError:
                     return await event.reply("❌ Invalid font size. Please provide a number.")
-        
+
         else:
-            # First argument might be font size (auto-detect language)
             try:
                 font_size = int(first_arg)
             except ValueError:
                 return await event.reply("❌ Usage: `topdf en/fa [size]` or `topdf [size]`")
-    
-    # Validate font size
+
     if font_size < 6 or font_size > 72:
         return await event.reply("❌ Font size must be between 6 and 72.")
-    
-    # Auto-detect language if not specified
+
     if language is None:
         language = "fa" if has_persian_characters(text_content[:100]) else "en"
 
@@ -2727,27 +2912,20 @@ async def handle_text_to_pdf(event, *args):
     pdf_filename = f"text_{event.id}_{int(time.time())}.pdf"
 
     try:
-        # Create PDF
-        await asyncio.get_event_loop().run_in_executor(
+        await asyncio.get_running_loop().run_in_executor(
             None,
             create_pdf_from_text,
-            text_content,
-            pdf_filename,
-            language,
-            font_size
+            text_content, pdf_filename, language, font_size
         )
 
-        # Verify file was created
         if not os.path.exists(pdf_filename) or os.path.getsize(pdf_filename) == 0:
             raise ValueError("PDF creation failed")
 
-        # Send PDF
         await safe_edit_message(progress_msg, "⬆️ Uploading...")
-        
-        # Create caption
+
         lang_name = "Persian" if language == "fa" else "English"
         font_name = "Vazirmatn" if language == "fa" else "Helvetica"
-        
+
         caption = (
             f"📄 **PDF Created**\n"
             f"🌐 **Language:** {lang_name}\n"
@@ -2755,7 +2933,7 @@ async def handle_text_to_pdf(event, *args):
             f"📏 **Size:** {font_size}pt\n"
             f"📊 **Length:** {len(text_content)} characters"
         )
-        
+
         await event.client.send_file(
             event.chat_id,
             pdf_filename,
@@ -2767,18 +2945,16 @@ async def handle_text_to_pdf(event, *args):
 
     except Exception as e:
         logger.error(f"Error in handle_text_to_pdf: {str(e)}")
-        import traceback
         logger.error(traceback.format_exc())
         await safe_edit_message(progress_msg, f"❌ Error: {str(e)}")
-    
+
     finally:
-        # Cleanup
         if os.path.exists(pdf_filename):
             try:
                 os.remove(pdf_filename)
             except Exception as e:
                 logger.warning(f"Failed to delete temp PDF: {e}")
-           
+
 
 async def handle_qr_generate(event, *args):
     """
@@ -3355,7 +3531,7 @@ async def handle_define(event, *args):
         # Get definitions from Free Dictionary API
         dict_url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{word}"
         
-        response = await asyncio.get_event_loop().run_in_executor(
+        response = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: requests.get(dict_url, timeout=10)
         )
@@ -3387,10 +3563,12 @@ async def handle_define(event, *args):
                 'q': word
             }
             
-            trans_response = await asyncio.get_event_loop().run_in_executor(
+
+            trans_response = await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: requests.get(persian_url, params=params, timeout=5)
             )
+
             
             if trans_response.status_code == 200:
                 trans_data = trans_response.json()
@@ -3532,11 +3710,9 @@ async def download_and_send_pronunciation(event, word, audio_url):
     pronunciation_msg = None
     
     try:
-        # Show pronunciation progress
         pronunciation_msg = await event.reply("🎙️ Downloading pronunciation...")
-        
-        # Download audio file
-        response = await asyncio.get_event_loop().run_in_executor(
+
+        response = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: requests.get(audio_url, timeout=15)
         )
@@ -3547,6 +3723,12 @@ async def download_and_send_pronunciation(event, word, audio_url):
         
         with open(filename, "wb") as f:
             f.write(response.content)
+            
+        # [Rest of the function logic follows...]
+
+            
+        # [Rest of the function logic follows...]
+
         
         file_size = os.path.getsize(filename)
         if file_size == 0:
@@ -3593,6 +3775,1295 @@ async def download_and_send_pronunciation(event, word, audio_url):
             except Exception as e:
                 logger.warning(f"Failed to delete pronunciation file: {e}")
               
+
+def generate_timer_hash():
+    """Generate a unique 8-character hash for timer."""
+    unique_str = f"{time.time()}{uuid.uuid4()}"
+    return hashlib.md5(unique_str.encode()).hexdigest()[:8]
+
+
+def number_to_styled(num: int, pad: int = 2) -> str:
+    """Convert a number to styled number characters."""
+    num_str = str(num).zfill(pad)
+    return ''.join(STYLED_NUMBERS.get(c, c) for c in num_str)
+
+
+def parse_timer_duration(duration_str: str) -> Optional[int]:
+    """
+    Parse duration string to seconds.
+    
+    Formats:
+        SS              -> seconds only (e.g., "10" = 10 seconds)
+        MM:SS           -> minutes:seconds
+        HH:MM:SS        -> hours:minutes:seconds
+        DD:HH:MM:SS     -> days:hours:minutes:seconds
+    
+    Returns:
+        Total seconds, or None if invalid format.
+    """
+    # Check if it's just a number (seconds only)
+    if duration_str.isdigit():
+        return int(duration_str)
+    
+    parts = duration_str.split(':')
+    
+    if not all(part.isdigit() for part in parts):
+        return None
+    
+    parts = [int(p) for p in parts]
+    
+    if len(parts) == 2:
+        # MM:SS
+        minutes, seconds = parts
+        return minutes * 60 + seconds
+    
+    elif len(parts) == 3:
+        # HH:MM:SS
+        hours, minutes, seconds = parts
+        return hours * 3600 + minutes * 60 + seconds
+    
+    elif len(parts) == 4:
+        # DD:HH:MM:SS
+        days, hours, minutes, seconds = parts
+        return days * 86400 + hours * 3600 + minutes * 60 + seconds
+    
+    return None
+
+
+def format_duration(seconds: int) -> str:
+    """Format seconds into human-readable duration."""
+    if seconds < 0:
+        seconds = 0
+    
+    days = seconds // 86400
+    hours = (seconds % 86400) // 3600
+    minutes = (seconds % 3600) // 60
+    secs = seconds % 60
+    
+    parts = []
+    
+    if days > 0:
+        parts.append(f"{days}d")
+    if hours > 0 or days > 0:
+        parts.append(f"{hours}h")
+    if minutes > 0 or hours > 0 or days > 0:
+        parts.append(f"{minutes}m")
+    parts.append(f"{secs}s")
+    
+    return ' '.join(parts)
+
+
+def format_duration_detailed(seconds: int) -> str:
+    """Format seconds into detailed human-readable duration."""
+    if seconds < 0:
+        seconds = 0
+    
+    days = seconds // 86400
+    hours = (seconds % 86400) // 3600
+    minutes = (seconds % 3600) // 60
+    secs = seconds % 60
+    
+    parts = []
+    
+    if days > 0:
+        parts.append(f"{days} day{'s' if days != 1 else ''}")
+    if hours > 0:
+        parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
+    if minutes > 0:
+        parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
+    if secs > 0 or not parts:
+        parts.append(f"{secs} second{'s' if secs != 1 else ''}")
+    
+    return ', '.join(parts)
+
+
+def format_styled_time(seconds: int) -> str:
+    """
+    Format seconds into styled DD : HH : MM : SS format.
+    Only shows necessary units.
+    """
+    if seconds < 0:
+        seconds = 0
+    
+    days = seconds // 86400
+    hours = (seconds % 86400) // 3600
+    minutes = (seconds % 3600) // 60
+    secs = seconds % 60
+    
+    parts = []
+    
+    if days > 0:
+        parts.append(number_to_styled(days))
+        parts.append(number_to_styled(hours))
+        parts.append(number_to_styled(minutes))
+        parts.append(number_to_styled(secs))
+    elif hours > 0:
+        parts.append(number_to_styled(hours))
+        parts.append(number_to_styled(minutes))
+        parts.append(number_to_styled(secs))
+    elif minutes > 0:
+        parts.append(number_to_styled(minutes))
+        parts.append(number_to_styled(secs))
+    else:
+        parts.append(number_to_styled(0))
+        parts.append(number_to_styled(secs))
+    
+    return ' : '.join(parts)
+
+
+def create_progress_bar_timer(remaining_seconds: int, total_seconds: int, width: int = 16) -> str:
+    """
+    Create progress bar using ▓ and ░ characters.
+    Shows remaining time (▓) and elapsed time (░).
+    Full → Empty as time passes.
+    """
+    if total_seconds <= 0:
+        return '░' * width
+    
+    # Calculate remaining ratio (starts full, goes to empty)
+    remaining_ratio = remaining_seconds / total_seconds
+    
+    # Clamp between 0 and 1
+    remaining_ratio = max(0, min(1, remaining_ratio))
+    
+    filled = int(width * remaining_ratio)
+    empty = width - filled
+    
+    return '█' * filled + '░' * empty
+
+
+def create_timer_message(title: str, remaining_seconds: int, total_seconds: int, timer_hash: str) -> str:
+    """Create the styled timer display message."""
+    
+    # Styled time display
+    styled_time = format_styled_time(remaining_seconds)
+    
+    # Progress bar (full to empty - remaining time)
+    progress_bar = create_progress_bar_timer(remaining_seconds, total_seconds)
+    
+    # Title in bold uppercase
+    styled_title = title.upper()
+    
+    message = (
+        f"⏰✖️ ~ **{styled_title}** ~ ✖️⏰\n\n"
+        f"{styled_time}\n\n"
+        f"🕐 {progress_bar} 🕐\n\n"
+        f"——————————————\n"
+        f"❌ `dismiss {timer_hash}`"
+    )
+    
+    return message
+    
+
+def create_timer_finished_message(title: str, total_seconds: int) -> str:
+    """Create the timer finished message."""
+    
+    styled_title = title.upper()
+    duration_text = format_duration_detailed(total_seconds)
+    current_time = datetime.now().strftime('%H:%M:%S')
+    
+    message = (
+        f"🔔✨ ~ **{styled_title}** ~ ✨🔔\n\n"
+        f"⏰ **Timer Finished!**\n\n"
+        f"⏱ **Duration:** {duration_text}\n"
+        f"✅ **Completed at:** {current_time}"
+    )
+    
+    return message
+
+
+async def update_timer_message(timer_hash: str):
+    """
+    Update timer with dynamic interval:
+    - Last 30 seconds: every 1 second
+    - Last 1 minute: every 3 seconds
+    - Otherwise: every 5 seconds
+    """
+    global active_timer_tasks
+    
+    try:
+        while True:
+            # Get timer from database
+            with get_db_cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM timers WHERE hash = %s AND is_active = TRUE",
+                    (timer_hash,)
+                )
+                timer = cur.fetchone()
+            
+            if not timer:
+                logger.info(f"Timer {timer_hash} no longer active, stopping updates")
+                break
+            
+            # Calculate remaining time
+            end_time = timer['end_time']
+            now = datetime.now()
+            remaining = (end_time - now).total_seconds()
+            
+            if remaining <= 0:
+                # Timer finished
+                await handle_timer_finished(timer)
+                break
+            
+            # Update the message
+            message_id = timer.get('message_id')
+            chat_id = timer['chat_id']
+            total_seconds = timer['duration_seconds']
+            
+            if message_id:
+                try:
+                    new_text = create_timer_message(
+                        timer['title'],
+                        int(remaining),
+                        total_seconds,
+                        timer_hash
+                    )
+                    
+                    await client.edit_message(chat_id, message_id, new_text)
+                    
+                except MessageNotModifiedError:
+                    pass
+                except FloodWaitError as e:
+                    logger.warning(f"Flood wait: sleeping {e.seconds} seconds")
+                    await asyncio.sleep(e.seconds)
+                except Exception as e:
+                    logger.warning(f"Failed to update timer message: {e}")
+            
+            # Dynamic interval based on remaining time
+            if remaining <= 30:
+                interval = 1  # Last 30 seconds: every 1 second
+            elif remaining <= 60:
+                interval = 3  # Last 1 minute: every 3 seconds
+            else:
+                interval = 5  # Otherwise: every 5 seconds
+            
+            await asyncio.sleep(interval)
+    
+    except asyncio.CancelledError:
+        logger.info(f"Timer update task cancelled: {timer_hash}")
+    except Exception as e:
+        logger.exception(f"Error in timer update loop for {timer_hash}: {e}")
+    finally:
+        if timer_hash in active_timer_tasks:
+            del active_timer_tasks[timer_hash]
+            
+
+async def handle_timer_finished(timer: dict):
+    """Handle timer completion - send notification and cleanup."""
+    
+    timer_hash = timer['hash']
+    chat_id = timer['chat_id']
+    title = timer['title']
+    duration_seconds = timer['duration_seconds']
+    
+    try:
+        # Mark timer as inactive in database
+        with get_db_cursor() as cur:
+            cur.execute(
+                "UPDATE timers SET is_active = FALSE WHERE hash = %s",
+                (timer_hash,)
+            )
+        
+        # Send completion message
+        completion_message = create_timer_finished_message(title, duration_seconds)
+        await client.send_message(chat_id, completion_message)
+        
+        logger.info(f"Timer {timer_hash} ({title}) completed")
+    
+    except Exception as e:
+        logger.exception(f"Error handling timer completion: {e}")
+    finally:
+        if timer_hash in active_timer_tasks:
+            del active_timer_tasks[timer_hash]
+
+
+async def start_timer_task(timer_hash: str):
+    """Start the background task for updating a timer."""
+    global active_timer_tasks
+    
+    # Cancel existing task if any
+    if timer_hash in active_timer_tasks:
+        old_task = active_timer_tasks[timer_hash].get('task')
+        if old_task and not old_task.done():
+            old_task.cancel()
+    
+    # Create new task
+    task = asyncio.create_task(update_timer_message(timer_hash))
+    active_timer_tasks[timer_hash] = {'task': task}
+    
+    return task
+
+
+async def handle_settimer(event, *args):
+    """
+    Set a new timer.
+    """
+    
+    if len(args) < 2:
+        return await event.reply(
+            "❌ **Usage:** `settimer [duration] [title]`\n\n"
+            "**Formats:**\n"
+            "• `SS` - Seconds only\n"
+            "• `MM:SS` - Minutes:Seconds\n"
+            "• `HH:MM:SS` - Hours:Minutes:Seconds\n"
+            "• `DD:HH:MM:SS` - Days:Hours:Minutes:Seconds\n\n"
+            "**Examples:**\n"
+            "• `settimer 10 Hello` → 10s\n"
+            "• `settimer 15:10 Salam` → 15m 10s\n"
+            "• `settimer 1:30:00 Break` → 1h 30m\n"
+            "• `settimer 1:2:30:00 Reminder` → 1d 2h 30m"
+        )
+    
+    duration_str = args[0]
+    title = ' '.join(args[1:])
+    
+    # Validate title
+    if not title.strip():
+        return await event.reply("❌ Timer title cannot be empty.")
+    
+    if len(title) > 255:
+        return await event.reply("❌ Timer title too long (max 255 characters).")
+    
+    # Parse duration
+    duration_seconds = parse_timer_duration(duration_str)
+    
+    if duration_seconds is None:
+        return await event.reply(
+            f"❌ Invalid duration format: `{duration_str}`\n\n"
+            "**Valid formats:**\n"
+            "• `SS` → 10 (10 seconds)\n"
+            "• `MM:SS` → 15:30\n"
+            "• `HH:MM:SS` → 1:15:30\n"
+            "• `DD:HH:MM:SS` → 2:12:15:30"
+        )
+    
+    if duration_seconds <= 0:
+        return await event.reply("❌ Duration must be greater than 0.")
+    
+    if duration_seconds > 365 * 86400:
+        return await event.reply("❌ Maximum timer duration is 1 year.")
+    
+    # Generate unique hash
+    timer_hash = generate_timer_hash()
+    
+    # Calculate end time
+    now = datetime.now()
+    end_time = now + timedelta(seconds=duration_seconds)
+    
+    user_id = event.sender_id
+    chat_id = event.chat_id
+    
+    try:
+        # Send initial timer message (no buttons)
+        initial_message = create_timer_message(title, duration_seconds, duration_seconds, timer_hash)
+        sent_message = await event.reply(initial_message)
+        
+        message_id = sent_message.id
+        
+        # Save to database
+        with get_db_cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO timers (hash, user_id, chat_id, title, duration_seconds, end_time, message_id, is_active)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE)
+                """,
+                (timer_hash, user_id, chat_id, title, duration_seconds, end_time, message_id)
+            )
+        
+        # Start the update task
+        await start_timer_task(timer_hash)
+        
+        logger.info(f"Timer set: {timer_hash} - '{title}' for {format_duration(duration_seconds)} by user {user_id}")
+    
+    except Exception as e:
+        logger.exception(f"Error setting timer: {e}")
+        await event.reply(f"❌ Failed to set timer: {str(e)}")
+
+
+async def handle_dismiss_timer(event, timer_hash: str):
+    """
+    Dismiss/cancel an active timer.
+    """
+    
+    user_id = event.sender_id
+    is_sudo_user = is_sudo(event)
+    
+    try:
+        # Get timer from database
+        with get_db_cursor() as cur:
+            cur.execute(
+                "SELECT * FROM timers WHERE hash = %s AND is_active = TRUE",
+                (timer_hash,)
+            )
+            timer = cur.fetchone()
+        
+        if not timer:
+            return await event.reply(f"❌ Timer `{timer_hash}` not found or already completed.")
+        
+        # Check permission (owner or sudo)
+        if timer['user_id'] != user_id and not is_sudo_user:
+            return await event.reply("❌ You can only dismiss your own timers.")
+        
+        # Cancel the update task
+        if timer_hash in active_timer_tasks:
+            task = active_timer_tasks[timer_hash].get('task')
+            if task and not task.done():
+                task.cancel()
+            del active_timer_tasks[timer_hash]
+        
+        # Mark as inactive in database
+        with get_db_cursor() as cur:
+            cur.execute(
+                "UPDATE timers SET is_active = FALSE WHERE hash = %s",
+                (timer_hash,)
+            )
+        
+        # Delete the timer message
+        try:
+            if timer['message_id']:
+                await client.delete_messages(timer['chat_id'], timer['message_id'])
+        except Exception as e:
+            logger.warning(f"Failed to delete timer message: {e}")
+        
+        # Send confirmation
+        styled_title = timer['title'].upper()
+        await event.reply(
+            f"🗑️ **Timer Dismissed**\n\n"
+            f"📌 **{styled_title}**\n"
+            f"❌ Timer cancelled successfully."
+        )
+        
+        logger.info(f"Timer dismissed: {timer_hash} by user {user_id}")
+    
+    except Exception as e:
+        logger.exception(f"Error dismissing timer: {e}")
+        await event.reply(f"❌ Failed to dismiss timer: {str(e)}")
+
+
+async def handle_resend_timer(event, timer_hash: str):
+    """
+    Resend a timer message with updated remaining time.
+    """
+    
+    user_id = event.sender_id
+    is_sudo_user = is_sudo(event)
+    
+    try:
+        # Get timer from database
+        with get_db_cursor() as cur:
+            cur.execute(
+                "SELECT * FROM timers WHERE hash = %s AND is_active = TRUE",
+                (timer_hash,)
+            )
+            timer = cur.fetchone()
+        
+        if not timer:
+            return await event.reply(f"❌ Timer `{timer_hash}` not found or already completed.")
+        
+        # Check permission (owner or sudo)
+        if timer['user_id'] != user_id and not is_sudo_user:
+            return await event.reply("❌ You can only resend your own timers.")
+        
+        # Calculate remaining time
+        end_time = timer['end_time']
+        now = datetime.now()
+        remaining = int((end_time - now).total_seconds())
+        
+        if remaining <= 0:
+            return await event.reply(f"❌ Timer `{timer_hash}` has already expired.")
+        
+        # Cancel existing update task
+        if timer_hash in active_timer_tasks:
+            task = active_timer_tasks[timer_hash].get('task')
+            if task and not task.done():
+                task.cancel()
+        
+        total_seconds = timer['duration_seconds']
+        
+        # Send new timer message
+        new_message = create_timer_message(timer['title'], remaining, total_seconds, timer_hash)
+        sent_message = await event.reply(new_message)
+        
+        new_message_id = sent_message.id
+        new_chat_id = event.chat_id
+        
+        # Update database with new message ID and chat ID
+        with get_db_cursor() as cur:
+            cur.execute(
+                "UPDATE timers SET message_id = %s, chat_id = %s WHERE hash = %s",
+                (new_message_id, new_chat_id, timer_hash)
+            )
+        
+        # Start new update task
+        await start_timer_task(timer_hash)
+        
+        logger.info(f"Timer resent: {timer_hash} - new message_id: {new_message_id}")
+    
+    except Exception as e:
+        logger.exception(f"Error resending timer: {e}")
+        await event.reply(f"❌ Failed to resend timer: {str(e)}")
+        
+
+async def handle_activetimers(event, *args):
+    """
+    List all active timers.
+    """
+    
+    user_id = event.sender_id
+    is_sudo_user = is_sudo(event)
+    
+    try:
+        with get_db_cursor() as cur:
+            if is_sudo_user:
+                cur.execute(
+                    """
+                    SELECT t.*, u.username 
+                    FROM timers t 
+                    LEFT JOIN users u ON t.user_id = u.id 
+                    WHERE t.is_active = TRUE 
+                    ORDER BY t.end_time ASC
+                    """
+                )
+            else:
+                cur.execute(
+                    "SELECT * FROM timers WHERE user_id = %s AND is_active = TRUE ORDER BY end_time ASC",
+                    (user_id,)
+                )
+            
+            timers = cur.fetchall()
+        
+        if not timers:
+            return await event.reply("ℹ️ No active timers found.")
+        
+        # Build message
+        now = datetime.now()
+        
+        if is_sudo_user:
+            message_lines = [f"⏰ **All Active Timers** ({len(timers)})\n"]
+        else:
+            message_lines = [f"⏰ **Your Active Timers** ({len(timers)})\n"]
+        
+        message_lines.append("——————————————\n")
+        
+        for timer in timers:
+            end_time = timer['end_time']
+            remaining = int((end_time - now).total_seconds())
+            
+            if remaining < 0:
+                remaining = 0
+            
+            styled_time = format_styled_time(remaining)
+            timer_hash = timer['hash']
+            title = timer['title'].upper()
+            
+            line = f"✖️ **{title}**\n"
+            line += f"   {styled_time}\n"
+            line += f"   🔄 `resend {timer_hash}`\n"
+            line += f"   ❌ `dismiss {timer_hash}`\n"
+            
+            # Add user info for sudo
+            if is_sudo_user:
+                username = timer.get('username') or f"ID: {timer['user_id']}"
+                line += f"   👤 {username}\n"
+            
+            line += "\n"
+            message_lines.append(line)
+        
+        message_lines.append("——————————————")
+        
+        await event.reply("".join(message_lines))
+    
+    except Exception as e:
+        logger.exception(f"Error listing active timers: {e}")
+        await event.reply(f"❌ Failed to list timers: {str(e)}")
+
+
+async def restore_active_timers():
+    """
+    Restore all active timers from database on bot startup.
+    """
+    
+    try:
+        with get_db_cursor() as cur:
+            cur.execute(
+                "SELECT * FROM timers WHERE is_active = TRUE AND end_time > NOW()"
+            )
+            timers = cur.fetchall()
+        
+        if not timers:
+            logger.info("No active timers to restore")
+            return
+        
+        restored_count = 0
+        expired_count = 0
+        
+        for timer in timers:
+            timer_hash = timer['hash']
+            end_time = timer['end_time']
+            now = datetime.now()
+            
+            remaining = (end_time - now).total_seconds()
+            
+            if remaining > 0:
+                await start_timer_task(timer_hash)
+                restored_count += 1
+                logger.info(f"Restored timer: {timer_hash} - '{timer['title']}' ({format_duration(int(remaining))} remaining)")
+            else:
+                await handle_timer_finished(timer)
+                expired_count += 1
+        
+        logger.info(f"Timer restoration complete: {restored_count} restored, {expired_count} expired")
+    
+    except Exception as e:
+        logger.exception(f"Error restoring timers: {e}")
+
+
+async def cleanup_expired_timers():
+    """
+    Mark expired timers as inactive.
+    """
+    
+    try:
+        with get_db_cursor() as cur:
+            cur.execute(
+                "UPDATE timers SET is_active = FALSE WHERE is_active = TRUE AND end_time < NOW()"
+            )
+            
+            if cur.rowcount > 0:
+                logger.info(f"Cleaned up {cur.rowcount} expired timers")
+    
+    except Exception as e:
+        logger.exception(f"Error cleaning up expired timers: {e}")
+             
+             
+async def handle_dismiss_command(event, *args):
+    """Handle dismiss command: dismiss [hash]"""
+    
+    if not args:
+        return await event.reply("❌ Usage: `dismiss [timer_hash]`")
+    
+    timer_hash = args[0]
+    
+    if len(timer_hash) != 8:
+        return await event.reply("❌ Invalid timer hash.")
+    
+    await handle_dismiss_timer(event, timer_hash)
+
+
+async def handle_resend_command(event, *args):
+    """Handle resend command: resend [hash]"""
+    
+    if not args:
+        return await event.reply("❌ Usage: `resend [timer_hash]`")
+    
+    timer_hash = args[0]
+    
+    if len(timer_hash) != 8:
+        return await event.reply("❌ Invalid timer hash.")
+    
+    await handle_resend_timer(event, timer_hash)
+    
+
+@sudo_only
+async def handle_self_restart(event, *args):
+    """Restart the bot using supervisor."""
+    user_id = event.sender_id
+
+    confirm_event = asyncio.Event()
+    confirm_result = {'confirmed': None}
+
+    confirm_msg = await event.reply(
+        "⚠️ **Restart Confirmation**\n\n"
+        "Are you sure you want to restart the bot?\n"
+        "Bot will be offline for ~10 seconds.\n\n"
+        "Type `yes` within 30 seconds to confirm."
+    )
+
+    restart_confirmations[user_id] = {
+        'pending': True,
+        'event': confirm_event,
+        'result': confirm_result,
+        'timestamp': time.time()
+    }
+
+    try:
+        await asyncio.wait_for(confirm_event.wait(), timeout=30)
+        confirmed = confirm_result['confirmed']
+    except asyncio.TimeoutError:
+        await confirm_msg.edit("⏳ Confirmation timed out. Restart cancelled.")
+        return
+    finally:
+        restart_confirmations.pop(user_id, None)
+
+    if not confirmed:
+        await confirm_msg.edit("👌 Restart cancelled.")
+        return
+
+    await confirm_msg.edit(
+        "🔄 **Restarting bot...**\n\n"
+        "⏳ Please wait 10 seconds.\n"
+        "Bot will be back online shortly."
+    )
+
+    logger.info(f"🔄 Restart requested by user {user_id}")
+
+    try:
+        await client.send_message(
+            LOG_CHANNEL_ID,
+            f"🔄 Bot restart initiated by user {user_id}\n"
+            f"⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+    except Exception:
+        pass
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            'supervisorctl', '-c', SUPERVISOR_CONFIG, 'restart', SUPERVISOR_PROCESS,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+
+        if proc.returncode != 0:
+            logger.error(f"❌ Restart failed: {stderr.decode()}")
+            await client.send_message(event.chat_id, f"❌ Restart failed:\n`{stderr.decode()}`")
+
+    except asyncio.TimeoutError:
+        await client.send_message(event.chat_id, "❌ Restart timed out. Check `self status`.")
+    except Exception as e:
+        logger.error(f"❌ Restart error: {e}")
+        await client.send_message(event.chat_id, f"❌ Unexpected error:\n`{str(e)}`")
+
+
+async def handle_self_status(event, *args):
+    """
+    Show bot status and uptime.
+    
+    Usage: self status
+    """
+    
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            'supervisorctl',
+            '-c', SUPERVISOR_CONFIG,
+            'status', SUPERVISOR_PROCESS,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        stdout, stderr = await proc.communicate()
+        
+        if proc.returncode == 0:
+            status_output = stdout.decode().strip()
+            
+            # Parse status
+            if 'RUNNING' in status_output:
+                status_emoji = "✅"
+                status_text = "RUNNING"
+            elif 'STOPPED' in status_output:
+                status_emoji = "⏹️"
+                status_text = "STOPPED"
+            elif 'STARTING' in status_output:
+                status_emoji = "🔄"
+                status_text = "STARTING"
+            elif 'FATAL' in status_output:
+                status_emoji = "❌"
+                status_text = "FATAL"
+            else:
+                status_emoji = "❓"
+                status_text = "UNKNOWN"
+            
+            await event.reply(
+                f"📊 **Bot Status**\n\n"
+                f"{status_emoji} **Status:** {status_text}\n"
+                f"📋 **Details:**\n`{status_output}`\n\n"
+                f"⏰ **Checked:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+        else:
+            await event.reply(f"❌ Failed to get status:\n`{stderr.decode()}`")
+    
+    except Exception as e:
+        logger.exception(f"Error getting status: {e}")
+        await event.reply(f"❌ Error: `{str(e)}`")
+
+
+async def handle_self_logs(event, *args):
+    """
+    Show recent error logs.
+    
+    Usage: self logs [lines]
+    Default: 20 lines
+    """
+    
+    lines = 20
+    if args and args[0].isdigit():
+        lines = min(int(args[0]), 100)  # Max 100 lines
+    
+    log_file = '/home/selfnit4/logs/selfbot.err.log'
+    
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            'tail',
+            '-n', str(lines),
+            log_file,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        stdout, stderr = await proc.communicate()
+        
+        if proc.returncode == 0:
+            log_content = stdout.decode().strip()
+            
+            if not log_content:
+                return await event.reply("📋 No recent logs found.")
+            
+            # Split if too long
+            if len(log_content) > 4000:
+                parts = [log_content[i:i+4000] for i in range(0, len(log_content), 4000)]
+                
+                for i, part in enumerate(parts, 1):
+                    await event.reply(
+                        f"📋 **Logs ({i}/{len(parts)})**\n\n```\n{part}\n```"
+                    )
+            else:
+                await event.reply(f"📋 **Recent Logs ({lines} lines)**\n\n```\n{log_content}\n```")
+        else:
+            await event.reply(f"❌ Failed to read logs:\n`{stderr.decode()}`")
+    
+    except Exception as e:
+        logger.exception(f"Error reading logs: {e}")
+        await event.reply(f"❌ Error: `{str(e)}`")
+
+
+def prepare_text(text):
+    """Reshape Persian text to connect letters correctly."""
+    if not text or not has_persian_characters(text):
+        return text
+    try:
+        # Reshape only (Vazirmatn handles RTL automatically in PIL)
+        return arabic_reshaper.reshape(text)
+    except:
+        return text
+
+
+def create_sticker_image(text):
+    """
+    Generates a 512x512 sticker with auto-scaling font and watermark.
+    Supports explicit line breaks (\n) and auto-wrapping.
+    """
+    width, height = 512, 512
+    padding = 30
+    max_width = width - (padding * 2)
+    max_height = height - (padding * 2) - 20
+    
+    image = Image.new('RGB', (width, height), (0, 0, 0))
+    draw = ImageDraw.Draw(image)
+
+    font_path = find_vazirmatn_font()
+    if not font_path:
+        logger.error("❌ Font not found!")
+        font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+
+    min_font_size = 20
+    max_font_size = 60
+    best_font = None
+    best_lines = None
+
+    def wrap_text_with_newlines(text, chars_per_line):
+        """Split by newlines first, then wrap each line."""
+        result = []
+        for paragraph in text.split('\n'):
+            if paragraph.strip():
+                wrapped = textwrap.wrap(paragraph, width=chars_per_line)
+                result.extend(wrapped if wrapped else [paragraph])
+            else:
+                result.append('')  # Empty line placeholder
+        return result if result else [text]
+
+    for font_size in range(max_font_size, min_font_size - 1, -5):
+        try:
+            font = ImageFont.truetype(font_path, font_size)
+        except:
+            continue
+
+        chars_per_line = max(5, int(max_width / (font_size * 0.5)))
+        
+        # ✅ Use new function that respects newlines
+        raw_lines = wrap_text_with_newlines(text, chars_per_line)
+        
+        # Process each line
+        visual_lines = []
+        for line in raw_lines:
+            if line.strip():
+                visual_lines.append(prepare_text(line))
+            else:
+                visual_lines.append('')
+        
+        # Measure all lines
+        fits = True
+        total_height = 0
+        line_data = []
+        
+        for line in visual_lines:
+            if line == '':
+                # Empty line spacing
+                h = font_size * 0.6
+                line_data.append(('', 0, h))
+                total_height += h
+            else:
+                bbox = draw.textbbox((0, 0), line, font=font)
+                w = bbox[2] - bbox[0]
+                h = bbox[3] - bbox[1]
+                line_data.append((line, w, h))
+                
+                if w > max_width:
+                    fits = False
+                    break
+                
+                total_height += h * 1.4
+        
+        if line_data and line_data[-1][0] != '':
+            total_height -= line_data[-1][2] * 0.4
+        
+        if total_height > max_height:
+            fits = False
+        
+        if fits:
+            best_font = font
+            best_lines = line_data
+            break
+
+    # Fallback
+    if best_font is None or best_lines is None:
+        best_font = ImageFont.truetype(font_path, min_font_size)
+        raw_lines = wrap_text_with_newlines(text, 30)
+        best_lines = []
+        for line in raw_lines:
+            if line:
+                processed = prepare_text(line)
+                bbox = draw.textbbox((0, 0), processed, font=best_font)
+                best_lines.append((processed, bbox[2] - bbox[0], bbox[3] - bbox[1]))
+            else:
+                best_lines.append(('', 0, min_font_size * 0.6))
+
+    # Calculate total height
+    total_height = sum(
+        h if line == '' else h * 1.4 
+        for (line, w, h) in best_lines
+    )
+    if best_lines and best_lines[-1][0] != '':
+        total_height -= best_lines[-1][2] * 0.4
+
+    # Draw main text (centered)
+    current_y = (height - total_height - 20) / 2 - 20 
+    
+    for (line, w, h) in best_lines:
+        if line == '':
+            current_y += h
+        else:
+            current_x = (width - w) / 2
+            draw.text((current_x, current_y), line, font=best_font, fill=(255, 255, 255))
+            current_y += h * 1.4
+
+    # Watermark
+    watermark_text = "@trrauuma"
+    try:
+        watermark_font = ImageFont.truetype(font_path, 30)
+    except:
+        watermark_font = ImageFont.load_default()
+    
+    wm_bbox = draw.textbbox((0, 0), watermark_text, font=watermark_font)
+    wm_w = wm_bbox[2] - wm_bbox[0]
+    wm_h = wm_bbox[3] - wm_bbox[1]
+    wm_x = (width - wm_w) / 2
+    wm_y = height - wm_h - 15
+    
+    draw.text((wm_x, wm_y), watermark_text, font=watermark_font, fill=(100, 100, 100))
+
+    output_path = f"sticker_{uuid.uuid4().hex[:8]}.webp"
+    image.save(output_path, "WEBP", quality=95)
+    
+    return output_path
+
+
+async def api_call(method, data):
+    url = f"https://api.telegram.org/bot{STICKER_BOT_TOKEN}/{method}"
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, data=data) as resp:
+            return await resp.json()
+
+
+async def api_create_pack(user_id, name, title, path):
+    full_name = f"{name}_by_{STICKER_BOT_USERNAME}"
+    data = aiohttp.FormData()
+    data.add_field('user_id', str(user_id))
+    data.add_field('name', full_name)
+    data.add_field('title', title)
+    data.add_field('png_sticker', open(path, 'rb'))
+    data.add_field('emojis', "🖤")
+    return await api_call('createNewStickerSet', data)
+
+
+async def api_add_sticker(user_id, name, path):
+    full_name = f"{name}_by_{STICKER_BOT_USERNAME}"
+    data = aiohttp.FormData()
+    data.add_field('user_id', str(user_id))
+    data.add_field('name', full_name)
+    data.add_field('png_sticker', open(path, 'rb'))
+    data.add_field('emojis', "🖤")
+    return await api_call('addStickerToSet', data)
+
+
+async def api_get_pack(name):
+    full_name = f"{name}_by_{STICKER_BOT_USERNAME}"
+    async with aiohttp.ClientSession() as session:
+        url = f"https://api.telegram.org/bot{STICKER_BOT_TOKEN}/getStickerSet"
+        async with session.post(url, json={'name': full_name}) as resp:
+            return await resp.json()
+           
+           
+@sudo_only
+async def handle_stick(event, *args):
+    global active_sticker_pack
+    
+    # ✅ FIX: Get raw message text instead of using args
+    raw_text = event.raw_text or event.text or ''
+    
+    # Remove the command prefix (stick or .stick etc)
+    if raw_text.startswith('.stick'):
+        text = raw_text[6:].strip()  # Remove ".stick"
+    elif raw_text.startswith('stick'):
+        text = raw_text[5:].strip()  # Remove "stick"
+    else:
+        text = ' '.join(args)  # Fallback
+    
+    if not text:
+        return await event.reply("❌ Usage: `stick [text]` or `stick -save [text]`")
+    
+    # Check for -save flag
+    save_to_pack = False
+    if text.startswith('-save'):
+        save_to_pack = True
+        text = text[5:].strip()  # Remove "-save"
+    
+    if not text.strip():
+        return await event.reply("❌ Text cannot be empty.")
+    
+    await event.delete()
+    
+    sticker_path = None
+    try:
+        sticker_path = create_sticker_image(text)
+        
+        sent_msg = await client.send_file(
+            event.chat_id, 
+            sticker_path,
+            attributes=[DocumentAttributeSticker(
+                alt="🖤",
+                stickerset=InputStickerSetEmpty()
+            )]
+        )
+        
+        if save_to_pack:
+            if not active_sticker_pack:
+                await client.send_message(event.chat_id, "⚠️ No active pack! Use `stickerpack create` or `open` first.")
+            else:
+                name = active_sticker_pack['name']
+                title = active_sticker_pack.get('title', 'My Stickers')
+                mode = active_sticker_pack['mode']
+                
+                # PNG Conversion for API
+                png_path = sticker_path.replace('.webp', '.png')
+                img = Image.open(sticker_path)
+                img.save(png_path, "PNG")
+                
+                if mode == 'create':
+                    resp = await api_create_pack(event.sender_id, name, title, png_path)
+                    if resp.get('ok'):
+                        active_sticker_pack['mode'] = 'add'
+                        with get_db_cursor() as cur:
+                            cur.execute("INSERT IGNORE INTO sticker_packs (name, title) VALUES (%s, %s)", (name, title))
+                        await client.send_message(event.chat_id, "✅ Added to pack.", reply_to=sent_msg)
+                    else:
+                        await client.send_message(event.chat_id, f"❌ API Error: {resp.get('description')}", reply_to=sent_msg)
+                        
+                elif mode == 'add':
+                    resp = await api_add_sticker(event.sender_id, name, png_path)
+                    if resp.get('ok'):
+                        await client.send_message(event.chat_id, "✅ Added to pack.", reply_to=sent_msg)
+                    else:
+                        await client.send_message(event.chat_id, f"❌ Save Error: {resp.get('description')}", reply_to=sent_msg)
+                
+                if os.path.exists(png_path):
+                    os.remove(png_path)
+
+    except Exception as e:
+        logger.exception(f"Sticker error: {e}")
+        await client.send_message(event.chat_id, f"❌ Error: {str(e)}")
+    finally:
+        if sticker_path and os.path.exists(sticker_path):
+            try:
+                os.remove(sticker_path)
+            except:
+                pass
+        
+@sudo_only
+async def handle_stickerpack(event, *args):
+    """
+    Manage sticker packs.
+    
+    Usage:
+        stickerpack create [name] [title]
+        stickerpack open [name]
+        stickerpack list
+        stickerpack delete [name]
+        stickerpack close
+    """
+    global active_sticker_pack
+    
+    if not args:
+        return await event.reply(
+            "📦 **Sticker Pack Commands**\n\n"
+            "`stickerpack create [name] [title]`\n"
+            "`stickerpack open [name]`\n"
+            "`stickerpack list`\n"
+            "`stickerpack delete [name]`\n"
+            "`stickerpack close`"
+        )
+    
+    cmd = args[0].lower()
+    
+    if cmd == 'create':
+        if len(args) < 3:
+            return await event.reply("❌ Usage: `stickerpack create [short_name] [title]`")
+        
+        name = args[1]
+        title = ' '.join(args[2:])
+        
+        with get_db_cursor() as cur:
+            cur.execute("SELECT 1 FROM sticker_packs WHERE name = %s", (name,))
+            if cur.fetchone():
+                return await event.reply(f"⚠️ Pack `{name}` already exists in DB. Use `open`.")
+        
+        active_sticker_pack = {
+            'name': name,
+            'title': title,
+            'mode': 'create'
+        }
+        
+        await event.reply(
+            f"🆕 **Pack Initialized**\n"
+            f"📦 Name: `{name}`\n"
+            f"🏷 Title: `{title}`\n\n"
+            f"👉 Send `stick -save [text]` to create it!"
+        )
+        
+    elif cmd == 'open':
+        if len(args) < 2:
+            return await event.reply("❌ Usage: `stickerpack open [name]`")
+        
+        name = args[1]
+        
+        with get_db_cursor() as cur:
+            cur.execute("SELECT title FROM sticker_packs WHERE name = %s", (name,))
+            res = cur.fetchone()
+        
+        if not res:
+            return await event.reply(f"❌ Pack `{name}` not found in database.")
+            
+        active_sticker_pack = {
+            'name': name,
+            'title': res['title'],
+            'mode': 'add'
+        }
+        
+        await event.reply(f"📂 **Pack Opened:** `{name}`\nReady to add stickers!")
+        
+    elif cmd == 'list':
+        try:
+            with get_db_cursor() as cur:
+                cur.execute("SELECT name, title, created_at FROM sticker_packs ORDER BY created_at DESC")
+                packs = cur.fetchall()
+            
+            if not packs:
+                return await event.reply("ℹ️ No sticker packs found.")
+            
+            lines = ["📦 **Your Sticker Packs**\n"]
+            for p in packs:
+                full_name = f"{p['name']}_by_{STICKER_BOT_USERNAME}"
+                link = f"https://t.me/addstickers/{full_name}"
+                lines.append(f"• **{p['title']}** (`{p['name']}`)\n  🔗 [Link]({link})")
+            
+            await event.reply("\n\n".join(lines), link_preview=False)
+            
+        except Exception as e:
+            await event.reply(f"❌ Error: {e}")
+
+    elif cmd == 'delete':
+        if len(args) < 2: 
+            return await event.reply("❌ Usage: `stickerpack delete [short_name]`")
+        
+        name = args[1]
+        full_name = f"{name}_by_{STICKER_BOT_USERNAME}"
+        
+        progress = await event.reply(f"⏳ Talking to @Stickers to delete `{full_name}`...")
+        
+        try:
+            async with client.conversation('Stickers', timeout=15) as conv:
+                
+                await conv.send_message('/delpack')
+                
+                resp = await conv.get_response()
+                if "Choose the sticker set" not in resp.text:
+                    return await progress.edit(f"❌ Unexpected response:\n`{resp.text}`")
+                
+                await conv.send_message(full_name)
+                
+                resp = await conv.get_response()
+                if "totally sure" not in resp.text:
+                    return await progress.edit(f"❌ Error from @Stickers:\n`{resp.text}`")
+                
+                await conv.send_message('Yes, I am totally sure.')
+                
+                resp = await conv.get_response()
+                if "gone" in resp.text or "Done" in resp.text:
+                    with get_db_cursor() as cur:
+                        cur.execute("DELETE FROM sticker_packs WHERE name = %s", (name,))
+                    
+                    await progress.edit(
+                        f"✅ **Pack Deleted**\n\n"
+                        f"🗑 Name: `{full_name}`\n"
+                        f"✨ Removed from Telegram & Database."
+                    )
+                else:
+                    await progress.edit(f"⚠️ Unexpected response:\n`{resp.text}`")
+
+        except asyncio.TimeoutError:
+            await progress.edit("❌ @Stickers is not responding. Try again later.")
+        except Exception as e:
+            logger.error(f"Stickers automation error: {e}")
+            await progress.edit(f"❌ Error: {str(e)}")
+
+    elif cmd == 'close':
+        if not active_sticker_pack:
+            return await event.reply("ℹ️ No active pack is open.")
+        
+        name = active_sticker_pack['name']
+        full_name = f"{name}_by_{STICKER_BOT_USERNAME}"
+        link = f"https://t.me/addstickers/{full_name}"
+        
+        active_sticker_pack = None
+        
+        await event.reply(
+            f"🔒 **Pack Closed**\n\n"
+            f"📦 Name: `{name}`\n"
+            f"🔗 Link: {link}"
+        )
+    
+    else:
+        await event.reply("❌ Unknown command. Use `stickerpack` for help.")
+
 ##-------------------------------------COMMANDS--------------------------------------##
 
 command_map = {
@@ -3659,6 +5130,14 @@ command_map = {
     'qreply': handle_qreply_main,
     'dic': handle_define,
     
+    'settimer': handle_settimer,
+    'activetimers': handle_activetimers,
+    'dismiss': handle_dismiss_command,
+    'resend': handle_resend_command,
+    
+    'stick': handle_stick,
+    'stickerpack': handle_stickerpack,
+    
     'setreact': handle_setemoji,
     'remreact': handle_remreact,
     'reactlist': handle_reactlist
@@ -3674,13 +5153,23 @@ async def handle_new_message(event):
     text = event.raw_text.strip()
     sender_id = event.sender_id
 
-    # ===== HANDLE YOUR OWN MESSAGES =====
     if event.message.out:
-        # Check for quick reply trigger FIRST (only for you)
+        if sender_id in restart_confirmations:
+            conf = restart_confirmations[sender_id]
+            if conf.get('pending'):
+                response = text.lower()
+                if response in ['yes', 'y']:
+                    conf['result']['confirmed'] = True
+                    conf['event'].set()
+                    return
+                elif response in ['no', 'n', 'cancel']:
+                    conf['result']['confirmed'] = False
+                    conf['event'].set()
+                    return
+                    
         if text.startswith('-') and await handle_quick_reply_trigger(event):
-            return  # Quick reply was handled, stop processing
+            return
 
-        # Allow only "self on" if bot is inactive
         if not bot_active and text.lower() != "self on":
             return
 
@@ -3741,22 +5230,44 @@ async def handle_new_message(event):
                 await handle_book_download_by_md5(event, book_id)
             else:
                 await event.reply("❌ Invalid book ID format")
-        
+
+
 async def start_bot():
     """Initialize bot on startup."""
     logger.info("Bot is starting...")
+    
+    # Setup Telegram logging
+    setup_telegram_logging()
+    logger.info("📡 Telegram logging enabled")
+    
+    # Restore active timers from database
+    await cleanup_expired_timers()
+    await restore_active_timers()
     
     startup_msg = (
         "🤖 **Self-Bot Online**\n\n"
         f"✅ Commands active: {len(command_map)}\n"
         f"📊 Database connected\n"
+        f"⏰ Timers restored\n"
+        f"📡 Logging to channel\n"
         f"⚡ Ready to use!\n\n"
         f"Type `help` for available commands."
     )
     
     await client.send_message('me', startup_msg)
+    
+    # Send startup log to channel
+    try:
+        await client.send_message(
+            LOG_CHANNEL_ID,
+            f"✅ Bot started successfully\n"
+            f"⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+    except Exception as e:
+        logger.warning(f"Failed to send startup log: {e}")
+    
     logger.info("Bot startup complete.")
-
+    
 
 async def main():
     """Main entry point."""
