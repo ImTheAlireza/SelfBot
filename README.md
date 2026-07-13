@@ -1,6 +1,3 @@
-# SelfBot
-[![Ask DeepWiki](https://devin.ai/assets/askdeepwiki.png)](https://deepwiki.com/ImTheAlireza/SelfBot)
-
 A feature-rich, asynchronous Telegram self-bot built with Telethon. It automates a user account with a wide array of powerful commands for administration, file management, AI interaction, and various utilities.
 
 ## Features
