@@ -36,24 +36,24 @@ from bidi.algorithm import get_display
 
 # Configuration
 TELEGRAM_CONFIG = {
-    'api_id': '********',
-    'api_hash': '*************************',
-    'phone_number': '+************',
+    'api_id': '23920732',
+    'api_hash': '4c0146c41f2e5ccdf9aa90df3a1de831',
+    'phone_number': '+989116947375',
     'session_name': 'selfbot'
 }
 
 BOT_CONFIG = {
     'active': True,
-    'spam_delay': 1.5,
-    'spam_limit': 50,
+    'spam_delay': 1.5,     # seconds between messages (never 0)
+    'spam_limit': 50,      # hard cap per run
     'spam_cooldown': 4,
-    'sudo_user_id': *********,
+    'sudo_user_id': 1038991065,
 }
 
 
 API_KEYS = {
-    'rapidapi': os.getenv('RAPIDAPI_KEY', '*******************************'),
-    'coinmarketcap': os.getenv('COINMARKETCAP_KEY', '*******************************')
+    'rapidapi': os.getenv('RAPIDAPI_KEY', 'a58dc11fa1msha5c73c40f77f5a6p1a796fjsndf7d1e46f55f'),
+    'coinmarketcap': os.getenv('COINMARKETCAP_KEY', 'cc4c01e3-0566-4b0a-8a94-62f0697ba2ca')
 }
 
 API_ENDPOINTS = {
@@ -105,11 +105,11 @@ spam_delay = BOT_CONFIG['spam_delay']
 spam_limit = BOT_CONFIG['spam_limit']
 spam_cooldown = BOT_CONFIG['spam_cooldown']
 SUDO_USER_ID = BOT_CONFIG['sudo_user_id']
-LOG_CHANNEL_ID = -************
+LOG_CHANNEL_ID = -5061365940
 SUPERVISOR_CONFIG = '/home/selfnit4/supervisord.conf'
 SUPERVISOR_PROCESS = 'selfbot'
 FONT_PATH = os.path.join(os.path.dirname(__file__), "fonts", "Vazirmatn-Regular.ttf")
-STICKER_BOT_TOKEN = "****************************************"
+STICKER_BOT_TOKEN = "8176933750:AAGFHdQxeJw3djyVwgDj_Gsh17bzK2WETz8"
 STICKER_BOT_USERNAME = "selfstickerhelperbot"
 
 
@@ -255,9 +255,9 @@ def get_db_cursor():
     try:
         conn = pymysql.connect(
             host=os.getenv('DB_HOST', 'localhost'),
-            user=os.getenv('DB_USER', '*************'),
-            password=os.getenv('DB_PASSWORD', '**************'),
-            database=os.getenv('DB_NAME', '**************'),
+            user=os.getenv('DB_USER', 'selfnit4_alireza'),
+            password=os.getenv('DB_PASSWORD', '9510290042AlirezA'),
+            database=os.getenv('DB_NAME', 'selfnit4_selfbot'),
             charset="utf8mb4",
             cursorclass=pymysql.cursors.DictCursor,
             autocommit=True
