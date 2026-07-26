@@ -11,7 +11,9 @@ services:
     volumes:
       # Persists the .session file and database. Losing this means logging in again.
       - selfbot-data:/data
-    # Interactive login on first run:  docker compose run --rm selfbot
+    # First run (interactive login, writes the session into the volume):
+    #   docker compose run --rm selfbot --login
+    # Then start normally:  docker compose up -d
     stdin_open: true
     tty: true
     logging:

@@ -240,3 +240,70 @@ def test_disabled_ai_reports_clearly(config):
 
     provider = build_provider(config.ai)
     assert provider.name == "none"
+
+
+# ---------------------------------------------------------------------------
+# `--login` bootstrap
+#
+# SUDO_USER_ID is required to run the bot, but a new user does not know their
+# own ID yet. `--login` resolves that chicken-and-egg by discovering it.
+# ---------------------------------------------------------------------------
+
+
+def test_login_config_does_not_require_sudo_id(monkeypatch, tmp_path):
+    for key in ("TELEGRAM_API_ID", "TELEGRAM_API_HASH", "SUDO_USER_ID"):
+        monkeypatch.delenv(key, raising=False)
+
+    env = tmp_path / ".env"
+    env.write_text("TELEGRAM_API_ID=1\nTELEGRAM_API_HASH=abc\nSUDO_USER_ID=\n")
+
+    # Normal load must reject the missing owner ID...
+    with pytest.raises(ConfigError, match="SUDO_USER_ID"):
+        load_config(env_file=env)
+
+    # ...but the login bootstrap must tolerate it.
+    config = load_config(env_file=env, allow_missing_sudo=True)
+    assert config.sudo_user_id == 0
+
+
+def test_persist_sudo_id_fills_empty_value(tmp_path):
+    from selfbot.__main__ import _persist_sudo_id
+
+    env = tmp_path / ".env"
+    env.write_text("TELEGRAM_API_ID=1\nSUDO_USER_ID=\n")
+    assert _persist_sudo_id(env, 12345) is True
+    assert "SUDO_USER_ID=12345" in env.read_text()
+
+
+def test_persist_sudo_id_appends_when_absent(tmp_path):
+    from selfbot.__main__ import _persist_sudo_id
+
+    env = tmp_path / ".env"
+    env.write_text("TELEGRAM_API_ID=1\n")
+    assert _persist_sudo_id(env, 12345) is True
+    assert "SUDO_USER_ID=12345" in env.read_text()
+
+
+def test_persist_sudo_id_never_clobbers_a_different_id(tmp_path):
+    """Someone else's ID in .env must survive; the user is told instead."""
+    from selfbot.__main__ import _persist_sudo_id
+
+    env = tmp_path / ".env"
+    env.write_text("SUDO_USER_ID=111\n")
+    assert _persist_sudo_id(env, 999) is False
+    assert env.read_text() == "SUDO_USER_ID=111\n"
+
+
+def test_persist_sudo_id_is_idempotent(tmp_path):
+    from selfbot.__main__ import _persist_sudo_id
+
+    env = tmp_path / ".env"
+    env.write_text("SUDO_USER_ID=999\n")
+    assert _persist_sudo_id(env, 999) is True
+    assert env.read_text().count("SUDO_USER_ID") == 1
+
+
+def test_persist_sudo_id_handles_missing_file(tmp_path):
+    from selfbot.__main__ import _persist_sudo_id
+
+    assert _persist_sudo_id(tmp_path / "nope" / ".env", 999) is False

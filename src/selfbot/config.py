@@ -205,11 +205,18 @@ def _redact_url(url: str) -> str:
     return f"{scheme}://{user}:***@{host}"
 
 
-def load_config(*, env_file: str | os.PathLike[str] | None = ".env") -> Config:
+def load_config(
+    *,
+    env_file: str | os.PathLike[str] | None = ".env",
+    allow_missing_sudo: bool = False,
+) -> Config:
     """Build a :class:`Config` from the environment.
 
     A ``.env`` file, when present, is loaded first but never overrides
     variables already set in the real environment.
+
+    Set ``allow_missing_sudo`` for the ``--login`` flow, where the owner's user
+    ID is not known yet and is discovered by signing in.
     """
     if env_file is not None:
         _load_dotenv(Path(env_file))
@@ -218,20 +225,28 @@ def load_config(*, env_file: str | os.PathLike[str] | None = ".env") -> Config:
     api_hash = _env("TELEGRAM_API_HASH")
     sudo_user_id = _env_int("SUDO_USER_ID")
 
-    missing = [
-        name
-        for name, value in (
-            ("TELEGRAM_API_ID", api_id),
-            ("TELEGRAM_API_HASH", api_hash),
-            ("SUDO_USER_ID", sudo_user_id),
-        )
-        if not value
-    ]
+    required: tuple[tuple[str, object], ...] = (
+        ("TELEGRAM_API_ID", api_id),
+        ("TELEGRAM_API_HASH", api_hash),
+        ("SUDO_USER_ID", sudo_user_id),
+    )
+    if allow_missing_sudo:
+        # `--login` runs before the user knows their own ID, so it is
+        # discovered rather than required. Placeholder is replaced after sign-in.
+        required = required[:2]
+        sudo_user_id = sudo_user_id or 0
+
+    missing = [name for name, value in required if not value]
     if missing:
+        hint = "Copy .env.example to .env and fill it in."
+        if missing == ["SUDO_USER_ID"]:
+            # The only value the user cannot look up themselves — offer the fix.
+            hint = (
+                "Run `python -m selfbot --login` to sign in; it will detect "
+                "your user ID and write SUDO_USER_ID into .env for you."
+            )
         raise ConfigError(
-            "Missing required configuration: "
-            + ", ".join(missing)
-            + ".\nCopy .env.example to .env and fill it in."
+            "Missing required configuration: " + ", ".join(missing) + ".\n" + hint
         )
 
     data_dir = Path(_env("DATA_DIR", "./data")).expanduser().resolve()

@@ -45,14 +45,18 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e ".[full]"
 
 cp .env.example .env
-$EDITOR .env          # add TELEGRAM_API_ID, TELEGRAM_API_HASH, SUDO_USER_ID
+$EDITOR .env             # add TELEGRAM_API_ID and TELEGRAM_API_HASH
 
-python -m selfbot --check   # validate config without connecting
-python -m selfbot           # first run prompts for the login code
+python -m selfbot --login   # sign in; fills in SUDO_USER_ID for you
+python -m selfbot           # start the bot
 ```
 
-Get `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` from [my.telegram.org](https://my.telegram.org).
-For `SUDO_USER_ID`, start the bot and send yourself `whoami`.
+Get `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` from [my.telegram.org](https://my.telegram.org)
+→ *API development tools*. `--login` discovers your user ID and writes
+`SUDO_USER_ID` into `.env`, so you never have to look it up.
+
+Verify anytime with `python -m selfbot --check`, which validates the config and
+command registry without connecting.
 
 ### Docker
 
