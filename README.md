@@ -37,6 +37,9 @@ typing commands into any chat.
 
 ## Quick start
 
+> **First time here?** [`SETUP.md`](SETUP.md) walks through everything step by
+> step, including rotating the credentials leaked by v1.
+
 ```bash
 git clone https://github.com/ImTheAlireza/SelfBot.git
 cd SelfBot
