@@ -1,0 +1,336 @@
+"""Typed, validated configuration loaded from the environment.
+
+Everything the bot needs comes from here. No secret is ever hardcoded, and
+missing optional configuration degrades a feature instead of crashing the bot.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Literal
+
+from .errors import ConfigError
+
+__all__ = ["Config", "load_config"]
+
+_TRUTHY = {"1", "true", "yes", "on", "y"}
+
+AIProvider = Literal["openai", "openrouter", "anthropic", "rapidapi", "none"]
+ImageProvider = Literal["openai", "rapidapi", "none"]
+TTSProvider = Literal["rapidapi", "none"]
+
+
+def _env(key: str, default: str = "") -> str:
+    return (os.getenv(key) or default).strip()
+
+
+def _env_bool(key: str, default: bool = False) -> bool:
+    raw = _env(key)
+    return raw.lower() in _TRUTHY if raw else default
+
+
+def _env_int(key: str, default: int | None = None) -> int | None:
+    raw = _env(key)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{key} must be an integer, got {raw!r}") from exc
+
+
+def _env_float(key: str, default: float) -> float:
+    raw = _env(key)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{key} must be a number, got {raw!r}") from exc
+
+
+def _env_choice(key: str, allowed: set[str], default: str) -> str:
+    raw = _env(key, default).lower()
+    if raw not in allowed:
+        raise ConfigError(
+            f"{key} must be one of {sorted(allowed)}, got {raw!r}"
+        )
+    return raw
+
+
+@dataclass(frozen=True, slots=True)
+class TelegramConfig:
+    api_id: int
+    api_hash: str
+    phone: str
+    session_name: str
+
+    @property
+    def redacted(self) -> dict[str, str]:
+        return {
+            "api_id": str(self.api_id),
+            "api_hash": f"{self.api_hash[:4]}…{self.api_hash[-2:]}",
+            "phone": f"…{self.phone[-4:]}" if self.phone else "(interactive)",
+            "session": self.session_name,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class AIConfig:
+    provider: AIProvider
+    api_key: str
+    base_url: str
+    model: str
+    reasoning_model: str
+    max_tokens: int
+    timeout: int
+
+    @property
+    def enabled(self) -> bool:
+        return self.provider != "none" and bool(self.api_key or self.base_url)
+
+
+@dataclass(frozen=True, slots=True)
+class ImageConfig:
+    provider: ImageProvider
+    api_key: str
+    model: str
+
+    @property
+    def enabled(self) -> bool:
+        return self.provider != "none" and bool(self.api_key)
+
+
+@dataclass(frozen=True, slots=True)
+class StickerConfig:
+    bot_token: str
+    bot_username: str
+    watermark: str
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.bot_token and self.bot_username)
+
+
+@dataclass(frozen=True, slots=True)
+class SupervisorConfig:
+    config_path: str
+    process_name: str
+    log_file: str
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.config_path and self.process_name)
+
+
+@dataclass(frozen=True, slots=True)
+class SpamConfig:
+    delay: float
+    limit: int
+    cooldown: float
+
+
+@dataclass(frozen=True, slots=True)
+class Config:
+    telegram: TelegramConfig
+    ai: AIConfig
+    image: ImageConfig
+    sticker: StickerConfig
+    supervisor: SupervisorConfig
+    spam: SpamConfig
+
+    sudo_user_id: int
+    database_url: str
+    data_dir: Path
+    log_level: str
+    log_channel_id: int | None
+    log_channel_level: str
+    command_prefix: str
+    quick_reply_prefix: str
+    rapidapi_key: str
+    tts_provider: TTSProvider
+    max_file_size_mb: int
+    temp_ttl_minutes: int
+
+    # Populated lazily so tests can point them somewhere temporary.
+    _dirs_created: bool = field(default=False, compare=False)
+
+    @property
+    def session_path(self) -> Path:
+        return self.data_dir / self.telegram.session_name
+
+    @property
+    def downloads_dir(self) -> Path:
+        return self.data_dir / "downloads"
+
+    @property
+    def max_file_size_bytes(self) -> int:
+        return self.max_file_size_mb * 1024 * 1024
+
+    def ensure_dirs(self) -> None:
+        """Create the data directories. Safe to call repeatedly."""
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.downloads_dir.mkdir(parents=True, exist_ok=True)
+
+    def describe(self) -> str:
+        """Human-readable, secret-free summary for startup logs."""
+        lines = [
+            f"session      : {self.session_path}",
+            f"database     : {_redact_url(self.database_url)}",
+            f"sudo user    : {self.sudo_user_id}",
+            f"prefix       : {self.command_prefix or '(none)'}",
+            f"ai provider  : {self.ai.provider}"
+            + (f" ({self.ai.model})" if self.ai.enabled else " [disabled]"),
+            f"image gen    : {self.image.provider}"
+            + ("" if self.image.enabled else " [disabled]"),
+            f"tts          : {self.tts_provider}",
+            f"stickers     : {'enabled' if self.sticker.enabled else 'disabled'}",
+            f"supervisor   : {'enabled' if self.supervisor.enabled else 'disabled'}",
+            f"log channel  : {self.log_channel_id or '(none)'}",
+        ]
+        return "\n".join(lines)
+
+
+def _redact_url(url: str) -> str:
+    """Strip credentials out of a database URL for safe logging."""
+    if "://" not in url:
+        return url
+    scheme, _, rest = url.partition("://")
+    if "@" not in rest:
+        return url
+    creds, _, host = rest.partition("@")
+    user = creds.split(":", 1)[0]
+    return f"{scheme}://{user}:***@{host}"
+
+
+def load_config(*, env_file: str | os.PathLike[str] | None = ".env") -> Config:
+    """Build a :class:`Config` from the environment.
+
+    A ``.env`` file, when present, is loaded first but never overrides
+    variables already set in the real environment.
+    """
+    if env_file is not None:
+        _load_dotenv(Path(env_file))
+
+    api_id = _env_int("TELEGRAM_API_ID")
+    api_hash = _env("TELEGRAM_API_HASH")
+    sudo_user_id = _env_int("SUDO_USER_ID")
+
+    missing = [
+        name
+        for name, value in (
+            ("TELEGRAM_API_ID", api_id),
+            ("TELEGRAM_API_HASH", api_hash),
+            ("SUDO_USER_ID", sudo_user_id),
+        )
+        if not value
+    ]
+    if missing:
+        raise ConfigError(
+            "Missing required configuration: "
+            + ", ".join(missing)
+            + ".\nCopy .env.example to .env and fill it in."
+        )
+
+    data_dir = Path(_env("DATA_DIR", "./data")).expanduser().resolve()
+    database_url = _env(
+        "DATABASE_URL", f"sqlite+aiosqlite:///{data_dir / 'selfbot.db'}"
+    )
+
+    ai_provider = _env_choice(
+        "AI_PROVIDER",
+        {"openai", "openrouter", "anthropic", "rapidapi", "none"},
+        "none",
+    )
+    ai_model = _env("AI_MODEL", "gpt-4o-mini")
+    ai = AIConfig(
+        provider=ai_provider,  # type: ignore[arg-type]
+        api_key=_env("AI_API_KEY") or _env("RAPIDAPI_KEY"),
+        base_url=_env("AI_BASE_URL"),
+        model=ai_model,
+        reasoning_model=_env("AI_REASONING_MODEL") or ai_model,
+        max_tokens=_env_int("AI_MAX_TOKENS", 2048) or 2048,
+        timeout=_env_int("AI_TIMEOUT", 120) or 120,
+    )
+
+    image_provider = _env_choice(
+        "IMAGE_PROVIDER", {"openai", "rapidapi", "none"}, "none"
+    )
+    image = ImageConfig(
+        provider=image_provider,  # type: ignore[arg-type]
+        api_key=_env("IMAGE_API_KEY") or _env("AI_API_KEY") or _env("RAPIDAPI_KEY"),
+        model=_env("IMAGE_MODEL", "gpt-image-1"),
+    )
+
+    sticker = StickerConfig(
+        bot_token=_env("STICKER_BOT_TOKEN"),
+        bot_username=_env("STICKER_BOT_USERNAME").lstrip("@"),
+        watermark=_env("STICKER_WATERMARK"),
+    )
+
+    supervisor = SupervisorConfig(
+        config_path=_env("SUPERVISOR_CONFIG"),
+        process_name=_env("SUPERVISOR_PROCESS", "selfbot"),
+        log_file=_env("SUPERVISOR_LOG_FILE"),
+    )
+
+    spam = SpamConfig(
+        delay=max(0.0, _env_float("SPAM_DELAY", 1.5)),
+        limit=max(1, _env_int("SPAM_LIMIT", 50) or 50),
+        cooldown=max(0.0, _env_float("SPAM_COOLDOWN", 4)),
+    )
+
+    return Config(
+        telegram=TelegramConfig(
+            api_id=api_id,  # type: ignore[arg-type]
+            api_hash=api_hash,
+            phone=_env("TELEGRAM_PHONE"),
+            session_name=_env("TELEGRAM_SESSION", "selfbot"),
+        ),
+        ai=ai,
+        image=image,
+        sticker=sticker,
+        supervisor=supervisor,
+        spam=spam,
+        sudo_user_id=sudo_user_id,  # type: ignore[arg-type]
+        database_url=database_url,
+        data_dir=data_dir,
+        log_level=_env("LOG_LEVEL", "INFO").upper(),
+        log_channel_id=_env_int("LOG_CHANNEL_ID"),
+        log_channel_level=_env("LOG_CHANNEL_LEVEL", "WARNING").upper(),
+        command_prefix=_env("COMMAND_PREFIX"),
+        quick_reply_prefix=_env("QUICK_REPLY_PREFIX", "-") or "-",
+        rapidapi_key=_env("RAPIDAPI_KEY"),
+        tts_provider=_env_choice("TTS_PROVIDER", {"rapidapi", "none"}, "none"),  # type: ignore[arg-type]
+        max_file_size_mb=_env_int("MAX_FILE_SIZE_MB", 512) or 512,
+        temp_ttl_minutes=_env_int("TEMP_TTL_MINUTES", 60) or 60,
+    )
+
+
+def _load_dotenv(path: Path) -> None:
+    """Minimal .env parser — no dependency, no surprises.
+
+    Supports ``KEY=value``, ``export KEY=value``, ``#`` comments and quoted
+    values. Existing environment variables always win.
+    """
+    if not path.is_file():
+        return
+
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        else:
+            value = value.split(" #", 1)[0].strip()
+        os.environ.setdefault(key, value)
