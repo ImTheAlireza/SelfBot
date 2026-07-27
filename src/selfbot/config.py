@@ -17,8 +17,10 @@ __all__ = ["Config", "load_config"]
 
 _TRUTHY = {"1", "true", "yes", "on", "y"}
 
-AIProvider = Literal["openai", "openrouter", "anthropic", "rapidapi", "none"]
-ImageProvider = Literal["openai", "rapidapi", "none"]
+AIProvider = Literal[
+    "openai", "openrouter", "agentrouter", "anthropic", "rapidapi", "none"
+]
+ImageProvider = Literal["openai", "agentrouter", "rapidapi", "none"]
 TTSProvider = Literal["rapidapi", "none"]
 
 
@@ -256,7 +258,7 @@ def load_config(
 
     ai_provider = _env_choice(
         "AI_PROVIDER",
-        {"openai", "openrouter", "anthropic", "rapidapi", "none"},
+        {"openai", "openrouter", "agentrouter", "anthropic", "rapidapi", "none"},
         "none",
     )
     ai_model = _env("AI_MODEL", "gpt-4o-mini")
@@ -271,7 +273,7 @@ def load_config(
     )
 
     image_provider = _env_choice(
-        "IMAGE_PROVIDER", {"openai", "rapidapi", "none"}, "none"
+        "IMAGE_PROVIDER", {"openai", "agentrouter", "rapidapi", "none"}, "none"
     )
     image = ImageConfig(
         provider=image_provider,  # type: ignore[arg-type]

@@ -25,6 +25,9 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["AIProviderBase", "ChatMessage", "build_image_provider", "build_provider"]
 
+#: AgentRouter is an OpenAI-compatible gateway fronting many upstream models.
+AGENTROUTER_BASE_URL = "https://agentrouter.org/v1"
+
 
 @dataclass(slots=True)
 class ChatMessage:
@@ -64,7 +67,8 @@ class DisabledProvider(AIProviderBase):
         raise FeatureDisabledError(
             self._reason
             or "AI is not configured. Set `AI_PROVIDER` and `AI_API_KEY` in your .env "
-            "(supports openai, openrouter, anthropic, or a local OpenAI-compatible server)."
+            "(supports openai, openrouter, agentrouter, anthropic, or a local "
+            "OpenAI-compatible server)."
         )
 
 
@@ -100,7 +104,9 @@ class OpenAICompatibleProvider(AIProviderBase):
         headers = {"Content-Type": "application/json"}
         if self._config.api_key:
             headers["Authorization"] = f"Bearer {self._config.api_key}"
-        if "openrouter" in self._base_url:
+        # Router gateways use these to attribute traffic; AgentRouter has been
+        # known to reject requests from clients it cannot identify.
+        if any(host in self._base_url for host in ("openrouter", "agentrouter")):
             headers["HTTP-Referer"] = "https://github.com/ImTheAlireza/SelfBot"
             headers["X-Title"] = "SelfBot"
 
@@ -222,6 +228,12 @@ def build_provider(config: AIConfig) -> AIProviderBase:
             base_url=config.base_url or "https://openrouter.ai/api/v1",
             name="openrouter",
         )
+    if config.provider == "agentrouter":
+        return OpenAICompatibleProvider(
+            config,
+            base_url=config.base_url or AGENTROUTER_BASE_URL,
+            name="agentrouter",
+        )
     if config.provider == "anthropic":
         return AnthropicProvider(config)
     if config.provider == "rapidapi":
@@ -253,21 +265,38 @@ class DisabledImageProvider(ImageProviderBase):
 
 
 class OpenAIImageProvider(ImageProviderBase):
-    name = "openai"
+    """OpenAI's images API, and any gateway that mirrors it."""
 
-    def __init__(self, config: ImageConfig) -> None:
+    name = "openai"
+    default_base_url = "https://api.openai.com/v1"
+
+    def __init__(
+        self,
+        config: ImageConfig,
+        *,
+        base_url: str | None = None,
+        name: str | None = None,
+    ) -> None:
         self._config = config
+        self._base_url = (base_url or self.default_base_url).rstrip("/")
+        if name:
+            self.name = name
 
     async def generate(self, prompt: str, *, size: str = "1024x1024") -> bytes | str:
         import base64
 
+        headers = {
+            "Authorization": f"Bearer {self._config.api_key}",
+            "Content-Type": "application/json",
+        }
+        if "agentrouter" in self._base_url:
+            headers["HTTP-Referer"] = "https://github.com/ImTheAlireza/SelfBot"
+            headers["X-Title"] = "SelfBot"
+
         data = await get_client().post_json(
-            "https://api.openai.com/v1/images/generations",
+            f"{self._base_url}/images/generations",
             json={"model": self._config.model, "prompt": prompt, "size": size, "n": 1},
-            headers={
-                "Authorization": f"Bearer {self._config.api_key}",
-                "Content-Type": "application/json",
-            },
+            headers=headers,
             timeout=180,
         )
         try:
@@ -311,6 +340,10 @@ def build_image_provider(config: ImageConfig) -> ImageProviderBase:
         return DisabledImageProvider()
     if config.provider == "openai":
         return OpenAIImageProvider(config)
+    if config.provider == "agentrouter":
+        return OpenAIImageProvider(
+            config, base_url=AGENTROUTER_BASE_URL, name="agentrouter"
+        )
     if config.provider == "rapidapi":
         return RapidAPIImageProvider(config)
     return DisabledImageProvider()

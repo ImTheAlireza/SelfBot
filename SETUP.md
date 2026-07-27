@@ -151,6 +151,27 @@ IMAGE_API_KEY=sk-...
 ```
 </details>
 
+<details open>
+<summary><b>AgentRouter</b> — one key, many models</summary>
+
+```env
+AI_PROVIDER=agentrouter
+AI_API_KEY=sk-your-agentrouter-key
+AI_MODEL=claude-sonnet-4-5-20250929
+AI_REASONING_MODEL=gpt-4o
+
+# Optional: image generation through the same key
+IMAGE_PROVIDER=agentrouter
+IMAGE_API_KEY=sk-your-agentrouter-key
+IMAGE_MODEL=dall-e-3
+```
+
+Keys come from [agentrouter.org/console/token](https://agentrouter.org/console/token).
+Use whatever model slug AgentRouter lists — it's a passthrough router, so the
+slug is sent through untouched. `AI_MODEL` powers `gpt`/`gpts`;
+`AI_REASONING_MODEL` powers `gptr`.
+</details>
+
 <details>
 <summary><b>OpenRouter</b> — many models behind one key, has web search</summary>
 

@@ -4,7 +4,7 @@
 
 **An asynchronous, plugin-based Telegram self-bot built on Telethon.**
 
-[![Tests](https://img.shields.io/badge/tests-153%20passing-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-173%20passing-brightgreen)](tests/)
 [![Ruff](https://img.shields.io/badge/lint-ruff%20clean-brightgreen)](pyproject.toml)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
@@ -26,7 +26,7 @@ typing commands into any chat.
 
 | | |
 |---|---|
-| 🤖 **AI** | Chat, web-search and reasoning modes. Works with OpenAI, OpenRouter, Anthropic, RapidAPI, or a local model (Ollama, LM Studio, vLLM). |
+| 🤖 **AI** | Chat, web-search and reasoning modes. Works with OpenAI, OpenRouter, AgentRouter, Anthropic, RapidAPI, or a local model (Ollama, LM Studio, vLLM). |
 | 📁 **Files** | Zip/unzip with AES passwords, batch queues, rename, audio tag editing, PDF page extraction. |
 | ⏰ **Timers** | Live-updating countdowns that survive restarts. |
 | 🎨 **Stickers** | Render text to stickers and manage packs via a helper bot. |
@@ -86,7 +86,7 @@ Everything is environment-driven; no secret ever goes in source. See
 | `SUDO_USER_ID` | ✅ | — | Your user ID; grants owner rights |
 | `DATABASE_URL` | | `sqlite+aiosqlite:///./data/selfbot.db` | SQLite or MySQL |
 | `COMMAND_PREFIX` | | *(none)* | Set to `.` to require `.help` |
-| `AI_PROVIDER` | | `none` | `openai`, `openrouter`, `anthropic`, `rapidapi` |
+| `AI_PROVIDER` | | `none` | `openai`, `openrouter`, `agentrouter`, `anthropic`, `rapidapi` |
 | `AI_API_KEY` | | — | Key for the chosen provider |
 | `AI_BASE_URL` | | — | Point at any OpenAI-compatible server |
 | `LOG_CHANNEL_ID` | | — | Mirror warnings/errors to a private channel |
@@ -241,7 +241,7 @@ usage hint rather than a traceback.
 ```bash
 pip install -e ".[dev,full]"
 
-pytest                      # 153 tests
+pytest                      # 173 tests
 pytest --cov=selfbot        # with coverage
 ruff check src tests        # lint
 mypy src/selfbot            # type check
