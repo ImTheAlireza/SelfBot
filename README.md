@@ -1,177 +1,307 @@
-A feature-rich, asynchronous Telegram self-bot built with Telethon. It automates a user account with a wide array of powerful commands for administration, file management, AI interaction, and various utilities.
+<div align="center">
 
-## Features
+# SelfBot
 
--   **Admin & Control**: Sudo/admin system, remote bot control (`on`, `off`, `restart`, `status`, `logs`) integrated with Supervisor.
--   **AI Integration**:
-    -   Access ChatGPT for standard queries (`gpt`), web-enabled searches (`gpts`), and reasoning (`gptr`).
-    -   Generate images from text prompts (`imagine`).
--   **File & Media Management**:
-    -   Create and extract ZIP archives, with password protection (`zipfile`, `unzip`).
-    -   Queue files for bulk zipping (`add`, `zipit`).
-    -   Rename files and edit audio metadata (`rename`, `metadata`).
-    -   Split PDF files by page range (`split`).
--   **Conversion Tools**:
-    -   Convert text to speech (`tts`).
-    -   Convert text messages to PDF documents with English and Persian support (`topdf`).
--   **Automation & Personalization**:
-    -   **Quick Replies**: Set, manage, and trigger text shortcuts (`qreply`, `-alias`).
-    -   **Auto-Reactions**: Automatically react with a specific emoji to new messages in designated channels (`setreact`).
-    -   **Stickers**: Create text-based stickers on the fly (`stick`) and manage them in personal sticker packs (`stickerpack`).
--   **Search & Download**:
-    -   Search Anna's Archive for books (`annas`) and articles (`art`).
--   **Information & Utilities**:
-    -   Fetch detailed user information, including profile pictures/videos (`info`).
-    -   Get daily and hourly weather forecasts (`dw`, `hw`).
-    -   Retrieve live currency, gold, and coin prices (`currency`).
-    -   Look up word definitions with English/Persian meanings and pronunciation (`dic`).
-    -   Generate and read QR codes with advanced color options (`qr`, `qradv`, `qrread`).
--   **Timers**: Set, view, and manage dynamic countdown timers with a rich, auto-updating display.
+**An asynchronous, plugin-based Telegram self-bot built on Telethon.**
 
-## Installation & Setup
+[![Tests](https://img.shields.io/badge/tests-222%20passing-brightgreen)](tests/)
+[![Ruff](https://img.shields.io/badge/lint-ruff%20clean-brightgreen)](pyproject.toml)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-1.  **Clone the Repository**
-    ```bash
-    git clone https://github.com/ImTheAlireza/selfbot.git
-    cd selfbot
-    ```
+</div>
 
-2.  **Install Dependencies**
-    Install all required Python packages. It is recommended to use a virtual environment.
-    ```bash
-    pip install telethon requests aiohttp pymysql pyzipper qrcode PyPDF2 arabic_reshaper python-bidi geopy beautifulsoup4 Pillow mutagen reportlab
-    ```
+> [!WARNING]
+> **Self-bots violate Telegram's Terms of Service.** Automating a user account
+> can get it limited or permanently banned. This project is for education and
+> personal experimentation. You accept all risk.
 
-3.  **Set Up Database**
-    This bot requires a MySQL database. Create a database and a user with privileges to access it. The bot will automatically create the necessary tables on first run.
+---
 
-4.  **Configure the Bot**
-    Open `self.py` and modify the following configuration sections with your own credentials. Do not share these values publicly.
+## What it does
 
-    -   **`TELEGRAM_CONFIG`**:
-        -   `api_id` & `api_hash`: Get these from [my.telegram.org](https://my.telegram.org).
-        -   `phone_number`: Your Telegram account's phone number in international format.
-    -   **`BOT_CONFIG`**:
-        -   `sudo_user_id`: Your Telegram user ID. This grants you owner privileges.
-    -   **`API_KEYS`**:
-        -   `rapidapi`: Your key from [RapidAPI](https://rapidapi.com/).
-    -   **`LOG_CHANNEL_ID`**: ID of the private channel where the bot will send logs (e.g., `-100123456789`).
-    -   **Database Credentials**: Locate the `get_db_cursor` function and update the `pymysql.connect` parameters (`host`, `user`, `password`, `database`) with your MySQL details.
-    -   **Supervisor (Optional)**: If you plan to use `self restart`, `self status`, or `self logs`, update the `SUPERVISOR_CONFIG` and `SUPERVISOR_PROCESS` paths.
-    -   **`STICKER_BOT_TOKEN`**: To use the `stickerpack` feature, you must create a helper bot via `@BotFather` and provide its token here.
+43 commands across AI, file manipulation, timers, stickers, QR codes, weather,
+dictionaries and chat automation — all driven from your own Telegram account by
+typing commands into any chat.
 
-5.  **Run the Bot**
-    -   **First Run**: Run the script directly to log in and create a `.session` file.
-        ```bash
-        python self.py
-        ```
-    -   **Deployment**: For continuous operation, it is highly recommended to run the bot using a process manager like `supervisor`.
+| | |
+|---|---|
+| 🤖 **AI** | Chat, web-search and reasoning modes. Works with OpenAI, OpenRouter, AgentRouter, Anthropic, RapidAPI, or a local model (Ollama, LM Studio, vLLM). |
+| 📁 **Files** | Zip/unzip with AES passwords, batch queues, rename, audio tag editing, PDF page extraction. |
+| ⏰ **Timers** | Live-updating countdowns that survive restarts. |
+| 🎨 **Stickers** | Render text to stickers and manage packs via a helper bot. |
+| 🔲 **Utilities** | QR generate/decode, text→PDF (English + Persian), weather, dictionary with audio, IRR exchange rates. |
+| ⚡ **Automation** | Quick-reply shortcuts, per-channel auto-reactions, controlled bulk deletion. |
 
-## Disclaimer
+---
 
-Using a self-bot is a violation of Telegram's Terms of Service. This can lead to your account being limited or permanently banned. The author is not responsible for any consequences of using this software. **Use at your own risk.**
+## Quick start
 
-## Command Reference
+> **First time here?** [`SETUP.md`](SETUP.md) walks through everything step by
+> step, including rotating the credentials leaked by v1.
 
-### General & Control
+```bash
+git clone https://github.com/ImTheAlireza/SelfBot.git
+cd SelfBot
 
-| Command                               | Description                                                                                                   |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `help`                                | Displays the list of available commands.                                                                      |
-| `self on`                             | Activates the bot.                                                                                            |
-| `self off`                            | Deactivates the bot (except for the `self on` command).                                                       |
-| `self restart`                        | **Sudo only.** Restarts the bot via Supervisor. Requires confirmation.                                        |
-| `self status`                         | **Sudo only.** Checks the bot's status via Supervisor.                                                        |
-| `self logs [n]`                       | **Sudo only.** Shows the last `n` lines of the error log (default: 20).                                        |
-| `info [user_id / @username]`          | Retrieves detailed information about a user. Replying to a message also works.                              |
-| `backup`                              | **Sudo only.** Backs up the script and database, sending the files to you.                                     |
-| `dbupdate`                            | **Sudo only.** Imports a database from a replied `.sql` backup file.                                          |
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[full]"
 
-### Admin Management (Sudo only)
+cp .env.example .env
+$EDITOR .env             # add TELEGRAM_API_ID and TELEGRAM_API_HASH
 
-| Command                  | Description                    |
-| ------------------------ | ------------------------------ |
-| `setadmin [user_id]`     | Adds a user as a bot admin.    |
-| `remadmin [user_id]`     | Removes a user from the admins.  |
-| `adminlist`              | Lists all sudo and admin users. |
+python -m selfbot --login   # sign in; fills in SUDO_USER_ID for you
+python -m selfbot           # start the bot
+```
 
-### Messaging & Deletion
+Get `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` from [my.telegram.org](https://my.telegram.org)
+→ *API development tools*. `--login` discovers your user ID and writes
+`SUDO_USER_ID` into `.env`, so you never have to look it up.
 
-| Command                                      | Description                                                                                             |
-| -------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `spam [message] [count]`                     | Sends a message multiple times.                                                                         |
-| `cancel`                                     | Stops the current spam task.                                                                            |
-| `spamset [delay/limit/cooldown] [value]`     | **Sudo only.** Configures spam settings. `delay` is in milliseconds.                                    |
-| `del [count]`                                | Deletes the last `count` messages.                                                                      |
-| `del [type]`                                 | Deletes messages of a specific type. Types: `photos`, `videos`, `voices`, `musics`, `files`, `all`, etc. |
+Verify anytime with `python -m selfbot --check`, which validates the config and
+command registry without connecting.
 
-### Automation & Personalization
+### Docker
 
-| Command                               | Description                                                                                                                                                                 |
-| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `qreply set [alias] [message]`        | Creates or updates a quick reply. Can also be used by replying to a message: `qreply set [alias]`.                                                                          |
-| `qreply remove [alias]`               | Deletes a quick reply.                                                                                                                                                      |
-| `qreply list`                         | Lists all your quick replies.                                                                                                                                               |
-| `-[alias]`                            | Triggers a quick reply by editing your message.                                                                                                                             |
-| `setreact @channel [emoji]`           | **Sudo only.** Sets an emoji to automatically react to new messages in a channel.                                                                                         |
-| `remreact @channel`                   | **Sudo only.** Removes an auto-reaction for a channel.                                                                                                                    |
-| `reactlist`                           | **Sudo only.** Lists all configured auto-reactions.                                                                                                                       |
+```bash
+cp .env.example .env && $EDITOR .env
+docker compose run --rm selfbot   # interactive first login
+docker compose up -d              # then run detached
+```
+
+The `selfbot-data` volume holds your `.session` file and database. **Back it
+up** — losing it means re-authenticating.
+
+---
+
+## Configuration
+
+Everything is environment-driven; no secret ever goes in source. See
+[`.env.example`](.env.example) for the full annotated list.
+
+| Variable | Required | Default | Purpose |
+|---|:---:|---|---|
+| `TELEGRAM_API_ID` | ✅ | — | From my.telegram.org |
+| `TELEGRAM_API_HASH` | ✅ | — | From my.telegram.org |
+| `SUDO_USER_ID` | ✅ | — | Your user ID; grants owner rights |
+| `DATABASE_URL` | | `sqlite+aiosqlite:///./data/selfbot.db` | SQLite or MySQL |
+| `COMMAND_PREFIX` | | *(none)* | Set to `.` to require `.help` |
+| `STARTUP_NOTIFY` | | `me` | Online message target: `me`, `off`, or a chat ID |
+| `AI_PROVIDER` | | `none` | `openai`, `openrouter`, `agentrouter`, `anthropic`, `rapidapi` |
+| `AI_API_KEY` | | — | Key for the chosen provider |
+| `AI_BASE_URL` | | — | Point at any OpenAI-compatible server |
+| `LOG_CHANNEL_ID` | | — | Mirror warnings/errors to a private channel |
+| `SUPERVISOR_PROCESS` | | `selfbot` | Enables `self status` / `self restart` |
+| `MAX_FILE_SIZE_MB` | | `512` | Ceiling on downloads and uploads |
+
+<details>
+<summary><b>Using a local model instead of a paid API</b></summary>
+
+```env
+AI_PROVIDER=openai
+AI_BASE_URL=http://localhost:11434/v1   # Ollama
+AI_API_KEY=ollama
+AI_MODEL=llama3.1
+```
+</details>
+
+<details>
+<summary><b>Using MySQL instead of SQLite</b></summary>
+
+```bash
+pip install -e ".[full,mysql]"
+```
+```env
+DATABASE_URL=mysql+aiomysql://user:password@localhost/selfbot
+```
+Tables are created automatically on first run.
+</details>
+
+---
+
+## Commands
+
+Commands are typed as plain messages from your own account. Set
+`COMMAND_PREFIX=.` if you'd rather write `.help`.
+
+### Core
+| Command | Description |
+|---|---|
+| `help [command]` | Command list, or detail for one command |
+| `ping` | Round-trip latency |
+| `whoami` | Your user ID, role and the current chat ID |
+| `status` | Uptime, provider and runtime counters |
+| `self on\|off\|restart\|status\|logs\|diag` | 👑 Process control and supervisor troubleshooting |
+
+### Admin 👑
+| Command | Description |
+|---|---|
+| `setadmin <id\|@user>` | Let another user run commands |
+| `remadmin <id>` | Revoke access |
+| `adminlist` | List authorised users |
+
+### Messaging
+| Command | Description |
+|---|---|
+| `spam <message> <count>` | Repeat a message, rate-limit aware |
+| `cancel` | Stop your running spam task |
+| `purge <count\|type> [--all-users]` | 👑 Delete your messages; add the flag for everyone's |
+| `info [user]` | User details (reply, mention, or yourself) |
+| `qreply set\|remove\|list\|info` | Manage `-alias` shortcuts |
+| `-<alias>` | Expand a quick reply in place |
+
+`purge` types: `photos`, `videos`, `voices`, `videomsgs`, `musics`, `files`,
+`stickers`, `gifs`, `links`, `all`.
+
+### Files
+| Command | Description |
+|---|---|
+| `zip [password]` | Compress a replied file (AES when a password is given) |
+| `unzip [password]` | Extract an archive — traversal and zip-bomb safe |
+| `add` / `zipqueue` / `zipclear` / `zipit [password]` | Batch multiple files into one archive |
+| `rename <name>` | Re-upload under a new name |
+| `metadata <title> - <artist>` | Rewrite audio tags |
+| `split <start>-<end>` | Extract a PDF page range |
+
+### AI
+| Command | Description |
+|---|---|
+| `gpt <prompt>` | Ask the configured model |
+| `gpts <prompt>` | Ask with web search |
+| `gptr <prompt>` | Ask using the reasoning model |
+| `imagine <prompt>` | Generate an image |
+
+Reply to a message and send `gpt` with no prompt to use that message as input.
 
 ### Timers
+| Command | Description |
+|---|---|
+| `settimer <duration> <title>` | Live countdown; survives restarts |
+| `activetimers` | List running timers |
+| `dismiss <hash>` / `resend <hash>` | Cancel or repost a timer |
 
-| Command                           | Description                                                               |
-| --------------------------------- | ------------------------------------------------------------------------- |
-| `settimer [duration] [title]`     | Sets a new countdown timer. Duration format: `HH:MM:SS` or `MM:SS`.       |
-| `activetimers`                    | Lists all currently active timers.                                        |
-| `dismiss [hash]`                  | Dismisses and deletes an active timer.                                    |
-| `resend [hash]`                   | Resends the timer message to the current chat.                            |
+Durations: `90`, `15:30`, `1:15:30`, `2:12:15:30`, or `1h30m`.
 
-### File & Media Tools
+### Utilities
+| Command | Description |
+|---|---|
+| `qr <text> [--size N] [--fg c] [--bg c]` | Generate a QR code |
+| `qrread` | Decode a QR from a replied image |
+| `topdf [en\|fa] [size]` | Convert replied text to PDF |
+| `weather <city>` / `hourly <city>` | Forecasts — no API key needed |
+| `dic <word>` | Definitions, examples and pronunciation audio |
+| `currency` | Live IRR rates, gold and coins |
+| `tts` | Read a replied message aloud |
 
-| Command                           | Description                                                              |
-| --------------------------------- | ------------------------------------------------------------------------ |
-| `zipfile [password]`              | Zips the replied file. Password is optional.                             |
-| `unzip [password]`                | Unzips the replied ZIP file. Password is required for protected archives. |
-| `add`                             | Adds the replied file to a queue for zipping.                            |
-| `zipit [password]`                | Zips all files in the queue.                                             |
-| `rename [new_name]`               | Renames the replied file.                                                |
-| `metadata [title] - [artist]`     | Edits the title and artist metadata of a replied audio file.             |
-| `split [start-end]`               | Splits a replied PDF from a start page to an end page.                   |
+### Automation & Stickers
+| Command | Description |
+|---|---|
+| `setreact <@channel> <emoji>` | 👑 Auto-react to new posts |
+| `remreact <@channel>` / `reactlist` | 👑 Manage auto-reactions |
+| `stick [-save] <text>` | Render text to a sticker |
+| `stickerpack create\|open\|list\|close\|delete` | Manage packs |
 
-### AI, Search, & Utilities
+👑 = owner only.
 
-| Command                           | Description                                                               |
-| --------------------------------- | ------------------------------------------------------------------------- |
-| `gpt [prompt]`                    | Gets a response from ChatGPT.                                             |
-| `gpts [prompt]`                   | Gets a response from ChatGPT with web search access.                     |
-| `gptr [prompt]`                   | Gets a response using GPT's reasoning mode.                               |
-| `imagine [prompt]`                | Generates an image based on the text prompt.                              |
-| `tts`                             | Converts the text of a replied message to speech.                         |
-| `topdf en/fa [size]`              | Converts replied text to a PDF. Language and font size are optional.      |
-| `dw [city]`                       | Gets the daily weather forecast for a city.                               |
-| `hw [city]`                       | Gets the hourly weather forecast for a city.                              |
-| `currency`                        | Fetches live prices for currencies, gold, and coins.                      |
-| `dic [word]`                      | Looks up a word's definition, pronunciation, and Persian translation.       |
-| `annas [query]`                   | Searches Anna's Archive for books.                                        |
-| `art [query]`                     | Searches Anna's Archive for articles.                                     |
-| `dl_[md5_hash]`                   | Downloads a book/article using its MD5 hash from a search result.         |
+---
 
-### Sticker Tools
+## Architecture
 
-| Command                                   | Description                                                                          |
-| ----------------------------------------- | ------------------------------------------------------------------------------------ |
-| `stick [text]`                            | Creates a sticker from the provided text.                                            |
-| `stick -save [text]`                      | Creates a sticker and adds it to the currently open pack.                            |
-| `stickerpack create [name] [title]`       | Initializes a new sticker pack. Not created until the first sticker is saved.    |
-| `stickerpack open [name]`                 | Opens an existing pack to add more stickers to it.                                   |
-| `stickerpack list`                        | Lists all your created sticker packs with links.                                     |
-| `stickerpack delete [name]`               | Deletes a sticker pack from Telegram and the database.                               |
-| `stickerpack close`                       | Closes the currently active pack.                                                    |
+```
+src/selfbot/
+├── __main__.py        CLI entry point, signal handling
+├── bot.py             Client lifecycle, routing, shared state
+├── config.py          Typed config loaded from the environment
+├── db.py              Async SQLite/MySQL layer + repositories
+├── registry.py        Command registry, validation, dispatch
+├── errors.py          Exception hierarchy
+├── logging_setup.py   Console, rotating file and Telegram sinks
+├── services/ai.py     Pluggable AI providers
+├── utils/             HTTP client, text helpers, filesystem safety
+└── plugins/           One module per feature area
+```
 
-### QR Code Tools
+**Adding a command** — drop a module in `plugins/`; it is auto-discovered:
 
-| Command                            | Description                                                              |
-| ---------------------------------- | ------------------------------------------------------------------------ |
-| `qr [text] [size]`                 | Generates a QR code. Size is optional (default: 10).                     |
-| `qradv [text] [fg_color] [bg_color]` | Generates a QR code with custom foreground and background colors.        |
-| `qrread`                           | Reads the QR code from a replied image.                                  |
+```python
+from ..registry import Context, command
+
+@command("hello", category="Fun", usage="hello <name>", min_args=1)
+async def cmd_hello(ctx: Context) -> None:
+    """Greet someone."""
+    await ctx.reply(f"Hello, {ctx.args[0]}!")
+```
+
+Argument rules (`min_args`, `max_args`, `requires_reply`, `sudo_only`) are
+enforced by the dispatcher before your handler runs, so a misuse produces a
+usage hint rather than a traceback.
+
+---
+
+## Development
+
+```bash
+pip install -e ".[dev,full]"
+
+pytest                      # 222 tests
+pytest --cov=selfbot        # with coverage
+ruff check src tests        # lint
+mypy src/selfbot            # type check
+python -m selfbot --check   # validate config + registry
+```
+
+**CI:** the workflow lives at `ci/github-actions.yml`; see [`ci/README.md`](ci/README.md)
+to enable it (one `git mv`).
+
+`tests/test_regressions.py` pins the specific bugs fixed in v2 so they cannot
+come back.
+
+---
+
+## Upgrading from v1
+
+The original single-file `self.py` was replaced by the `src/selfbot/` package.
+
+1. **Rotate every credential** that was hardcoded in v1 — the Telegram API hash,
+   RapidAPI key, CoinMarketCap key, MySQL password and sticker bot token were
+   committed to git and must be considered compromised.
+2. Move your settings into `.env` (see `.env.example`).
+3. Run `python -m selfbot` instead of `python self.py`.
+4. Your existing MySQL data still works — set `DATABASE_URL` to point at it.
+
+Renamed commands: `zipfile`→`zip` (alias kept), `del`→`purge` (alias kept),
+`dw`→`weather` (alias kept), `hw`→`hourly` (alias kept), `qradv` folded into
+`qr --fg/--bg`.
+
+### What changed under the hood
+
+| v1 | v2 |
+|---|---|
+| Secrets hardcoded and committed | Environment-driven, git-scanned in CI |
+| 9 commands crashed on arguments | Dispatcher validates arity up front |
+| Blocking `requests` in async handlers | Shared async client with retries |
+| Blocking MySQL on every message | Async SQLite/MySQL, cached auth |
+| `extractall` on untrusted zips | Traversal, symlink and bomb protection |
+| Path traversal via `rename` | Filenames sanitised to one component |
+| Naive `datetime.now()` vs SQL `NOW()` | UTC end to end |
+| 5,293-line single file | 20 focused modules |
+| No tests, lint or CI | 153 tests, ruff clean, CI matrix |
+
+---
+
+## Security
+
+- Secrets live only in `.env`, which is gitignored; CI fails on committed credentials.
+- Archive extraction blocks path traversal, absolute paths, symlink escapes and zip bombs.
+- Filenames from users are reduced to a single sanitised path component.
+- All SQL uses bound parameters.
+- Downloads are size-capped by `MAX_FILE_SIZE_MB`.
+- `.session` files grant full account access — never share or commit them.
+
+Found a vulnerability? Open a private security advisory rather than a public issue.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).

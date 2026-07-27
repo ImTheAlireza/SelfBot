@@ -1,0 +1,26 @@
+services:
+  selfbot:
+    build: .
+    image: selfbot:2.0.0
+    container_name: selfbot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+      DATABASE_URL: sqlite+aiosqlite:////data/selfbot.db
+    volumes:
+      # Persists the .session file and database. Losing this means logging in again.
+      - selfbot-data:/data
+    # First run (interactive login, writes the session into the volume):
+    #   docker compose run --rm selfbot --login
+    # Then start normally:  docker compose up -d
+    stdin_open: true
+    tty: true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  selfbot-data:
