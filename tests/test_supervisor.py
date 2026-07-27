@@ -452,3 +452,76 @@ async def test_diag_surfaces_stale_entry_point(bot, registry, tmp_path):
     output = " ".join(event.replies)
     assert "self.py" in output
     assert "-m selfbot" in output
+
+
+# ---------------------------------------------------------------------------
+# Unattended start-up
+#
+# Telethon prompts on stdin when there is no valid session. Under a process
+# manager there is no stdin, so it died with "No phone number or bot token
+# provided" — which never mentions the session file or how to fix it.
+# ---------------------------------------------------------------------------
+
+
+class _Unauthorised:
+    """Client that connects but reports no valid session."""
+
+    def __init__(self):
+        self.started = False
+
+    async def connect(self):
+        return None
+
+    async def is_user_authorized(self):
+        return False
+
+    async def start(self, **_kwargs):
+        self.started = True
+
+
+class _NotATty:
+    def isatty(self):
+        return False
+
+
+class _IsATty:
+    def isatty(self):
+        return True
+
+
+@pytest.mark.asyncio
+async def test_unattended_start_without_session_explains(config, monkeypatch):
+    from selfbot.bot import SelfBot
+    from selfbot.errors import ConfigError
+
+    monkeypatch.setattr(sup.sys, "stdin", _NotATty(), raising=False)
+    import sys as _sys
+
+    monkeypatch.setattr(_sys, "stdin", _NotATty())
+
+    client = _Unauthorised()
+    bot = SelfBot(config, client=client)
+
+    with pytest.raises(ConfigError) as excinfo:
+        await bot._sign_in()
+
+    message = str(excinfo.value)
+    assert "--login" in message
+    assert ".session" in message
+    assert not client.started, "must not fall through to an stdin prompt"
+
+
+@pytest.mark.asyncio
+async def test_interactive_start_still_prompts(config, monkeypatch):
+    """On a real terminal, defer to Telethon's normal login flow."""
+    import sys as _sys
+
+    from selfbot.bot import SelfBot
+
+    monkeypatch.setattr(_sys, "stdin", _IsATty())
+
+    client = _Unauthorised()
+    bot = SelfBot(config, client=client)
+    await bot._sign_in()
+
+    assert client.started

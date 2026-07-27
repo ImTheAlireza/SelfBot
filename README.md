@@ -4,7 +4,7 @@
 
 **An asynchronous, plugin-based Telegram self-bot built on Telethon.**
 
-[![Tests](https://img.shields.io/badge/tests-210%20passing-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-212%20passing-brightgreen)](tests/)
 [![Ruff](https://img.shields.io/badge/lint-ruff%20clean-brightgreen)](pyproject.toml)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
@@ -242,7 +242,7 @@ usage hint rather than a traceback.
 ```bash
 pip install -e ".[dev,full]"
 
-pytest                      # 210 tests
+pytest                      # 212 tests
 pytest --cov=selfbot        # with coverage
 ruff check src tests        # lint
 mypy src/selfbot            # type check

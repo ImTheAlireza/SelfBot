@@ -341,7 +341,12 @@ for you and prints ❌ if the command is stale — update it to:
 command=/home/youruser/Selfbot/.venv/bin/python -m selfbot
 ```
 
-then `supervisorctl reread && supervisorctl update`.
+then `supervisorctl reread && supervisorctl update selfbot`.
+
+A ready-to-copy stanza with every recommended setting lives in
+[`deploy/supervisord-example.conf`](deploy/supervisord-example.conf), and
+[`deploy/README.md`](deploy/README.md) covers the virtualenv question and
+common failures.
 
 **Non-default config location?** Only then do you need:
 

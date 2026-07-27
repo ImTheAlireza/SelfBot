@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 import time
 from collections.abc import Awaitable
 from typing import Any
@@ -19,6 +20,7 @@ from telethon.errors import FloodWaitError, MessageNotModifiedError
 
 from .config import Config
 from .db import Database
+from .errors import ConfigError
 from .logging_setup import TelegramLogHandler
 from .registry import CommandRegistry
 from .registry import registry as global_registry
@@ -118,7 +120,7 @@ class SelfBot:
 
         self._register_events()
 
-        await self.client.start(phone=self.config.telegram.phone or None)
+        await self._sign_in()
         self.me = await self.client.get_me()
 
         logger.info(
@@ -139,6 +141,29 @@ class SelfBot:
         self._spawn(self._janitor(), name="janitor")
 
         logger.info("Ready — %d commands registered", len(self.registry))
+
+    async def _sign_in(self) -> None:
+        """Authenticate, failing loudly when running unattended.
+
+        Telethon falls back to prompting on stdin. Under a process manager
+        there is no stdin, so it dies with `ValueError: No phone number or bot
+        token provided.` — which says nothing about the real cause. Detect the
+        situation first and name the fix.
+        """
+        await self.client.connect()
+
+        if not await self.client.is_user_authorized():
+            interactive = sys.stdin is not None and sys.stdin.isatty()
+            if not interactive:
+                raise ConfigError(
+                    "Not logged in, and there is no terminal to log in from.\n"
+                    f"The session file is missing or expired: "
+                    f"{self.config.session_path}.session\n\n"
+                    "Stop the service, run `python -m selfbot --login` from a "
+                    "shell in the project directory, then start it again."
+                )
+
+        await self.client.start(phone=self.config.telegram.phone or None)
 
     async def run(self) -> None:
         await self.start()
