@@ -24,9 +24,11 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "ProgramAudit",
     "SupervisorNotFound",
     "SupervisorResult",
     "SupervisorRunner",
+    "audit_program",
     "describe_discovery",
 ]
 
@@ -254,6 +256,124 @@ class SupervisorRunner:
 
     async def start(self, timeout: float = 30.0) -> SupervisorResult:
         return await self.run("start", self.process_name, timeout=timeout)
+
+
+@dataclass(slots=True)
+class ProgramAudit:
+    """What a supervisord ``[program:...]`` section says about our process."""
+
+    found: bool = False
+    config_file: str = ""
+    command: str = ""
+    directory: str = ""
+    problems: list[str] | None = None
+    notes: list[str] | None = None
+
+    def __post_init__(self) -> None:
+        if self.problems is None:
+            self.problems = []
+        if self.notes is None:
+            self.notes = []
+
+
+def _iter_config_files(config_path: str) -> list[Path]:
+    """The supervisord config plus anything it pulls in via [include]."""
+    candidates: list[Path] = []
+    if config_path:
+        candidates.append(Path(config_path).expanduser())
+    else:
+        candidates += [
+            Path("/etc/supervisord.conf"),
+            Path("/etc/supervisor/supervisord.conf"),
+            Path.home() / "supervisord.conf",
+            Path.cwd() / "supervisord.conf",
+        ]
+
+    resolved: list[Path] = []
+    for base in candidates:
+        if not base.is_file():
+            continue
+        resolved.append(base)
+        try:
+            text = base.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        # Follow [include] files= globs, where per-app programs usually live.
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped.lower().startswith("files"):
+                continue
+            _, _, patterns = stripped.partition("=")
+            for pattern in patterns.split():
+                pattern = pattern.strip()
+                if not pattern:
+                    continue
+                target = Path(pattern).expanduser()
+                if not target.is_absolute():
+                    target = base.parent / target
+                try:
+                    resolved.extend(sorted(target.parent.glob(target.name))[:20])
+                except (OSError, ValueError):
+                    continue
+    return resolved
+
+
+def audit_program(process_name: str, config_path: str = "") -> ProgramAudit:
+    """Inspect the ``[program:NAME]`` section and sanity-check its command.
+
+    The v1 bot was launched with ``python self.py``. That file no longer
+    exists in v2, so an un-migrated supervisord config will happily stop the
+    bot and then fail to start it again. Catching that here turns a confusing
+    outage into a clear warning.
+    """
+    import configparser
+
+    audit = ProgramAudit()
+    section = f"program:{process_name}"
+
+    for config_file in _iter_config_files(config_path):
+        parser = configparser.ConfigParser(interpolation=None, strict=False)
+        try:
+            parser.read(config_file, encoding="utf-8")
+        except (configparser.Error, OSError):
+            continue
+        if not parser.has_section(section):
+            continue
+
+        audit.found = True
+        audit.config_file = str(config_file)
+        audit.command = parser.get(section, "command", fallback="").strip()
+        audit.directory = parser.get(section, "directory", fallback="").strip()
+        break
+
+    if not audit.found:
+        return audit
+
+    command = audit.command
+    if not command:
+        audit.problems.append("No `command=` set for this program.")
+        return audit
+
+    # The critical check: does it still launch the deleted v1 entry point?
+    if "self.py" in command:
+        audit.problems.append(
+            "`command` runs `self.py`, which no longer exists in v2. "
+            "Change it to `-m selfbot` or the bot will not come back up."
+        )
+    elif "-m selfbot" not in command and "/selfbot" not in command:
+        audit.notes.append(
+            "`command` does not obviously launch this bot — double-check it."
+        )
+
+    # Verify the interpreter or executable actually exists.
+    executable = command.split()[0] if command.split() else ""
+    if executable.startswith("/") and not Path(executable).exists():
+        audit.problems.append(f"`{executable}` does not exist.")
+
+    if audit.directory and not Path(audit.directory).expanduser().is_dir():
+        audit.problems.append(f"`directory={audit.directory}` does not exist.")
+
+    return audit
 
 
 def parse_state(output: str) -> str:

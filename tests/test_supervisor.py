@@ -325,3 +325,130 @@ async def test_restart_does_not_prompt_when_ctl_is_missing(
 
     assert not bot.confirm_prompts
     assert any("self diag" in r for r in event.replies)
+
+
+# ---------------------------------------------------------------------------
+# [program:...] audit
+#
+# v1 launched the bot with `python self.py`. v2 deleted that file, so an
+# un-migrated supervisord config stops the bot and cannot start it again.
+# ---------------------------------------------------------------------------
+
+
+def write_config(path: Path, body: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body)
+    return path
+
+
+def test_audit_flags_stale_v1_entry_point(tmp_path):
+    from selfbot.services.supervisor import audit_program
+
+    config = write_config(
+        tmp_path / "supervisord.conf",
+        "[program:selfbot]\n"
+        "command=/opt/venv/bin/python self.py\n",
+    )
+    audit = audit_program("selfbot", str(config))
+
+    assert audit.found
+    assert any("self.py" in problem for problem in audit.problems)
+
+
+def test_audit_accepts_v2_entry_point(tmp_path):
+    from selfbot.services.supervisor import audit_program
+
+    venv = make_executable(tmp_path / "venv" / "bin" / "python")
+    workdir = tmp_path / "app"
+    workdir.mkdir()
+    config = write_config(
+        tmp_path / "supervisord.conf",
+        f"[program:selfbot]\ncommand={venv} -m selfbot\ndirectory={workdir}\n",
+    )
+    audit = audit_program("selfbot", str(config))
+
+    assert audit.found
+    assert audit.problems == []
+    assert audit.notes == []
+
+
+def test_audit_follows_include_files(tmp_path):
+    """Per-app programs usually live in an [include]d directory."""
+    from selfbot.services.supervisor import audit_program
+
+    included = write_config(
+        tmp_path / "conf.d" / "selfbot.conf",
+        "[program:selfbot]\ncommand=/usr/bin/python3 -m selfbot\n",
+    )
+    main = write_config(
+        tmp_path / "supervisord.conf",
+        f"[supervisord]\nlogfile=/tmp/x.log\n\n[include]\nfiles = {tmp_path}/conf.d/*.conf\n",
+    )
+    audit = audit_program("selfbot", str(main))
+
+    assert audit.found
+    assert audit.config_file == str(included)
+
+
+def test_audit_reports_missing_section(tmp_path):
+    from selfbot.services.supervisor import audit_program
+
+    config = write_config(
+        tmp_path / "supervisord.conf", "[program:other]\ncommand=/bin/true\n"
+    )
+    audit = audit_program("selfbot", str(config))
+
+    assert not audit.found
+
+
+def test_audit_flags_missing_interpreter(tmp_path):
+    from selfbot.services.supervisor import audit_program
+
+    config = write_config(
+        tmp_path / "supervisord.conf",
+        "[program:selfbot]\ncommand=/no/such/python -m selfbot\n",
+    )
+    audit = audit_program("selfbot", str(config))
+
+    assert any("does not exist" in problem for problem in audit.problems)
+
+
+def test_audit_survives_malformed_config(tmp_path):
+    """A broken config must not crash `self diag`."""
+    from selfbot.services.supervisor import audit_program
+
+    config = write_config(tmp_path / "supervisord.conf", "this is not ini {{{")
+    audit = audit_program("selfbot", str(config))
+
+    assert not audit.found
+
+
+def test_audit_handles_absent_file():
+    from selfbot.services.supervisor import audit_program
+
+    assert not audit_program("selfbot", "/no/such/supervisord.conf").found
+
+
+@pytest.mark.asyncio
+async def test_diag_surfaces_stale_entry_point(bot, registry, tmp_path):
+    import dataclasses
+
+    config = write_config(
+        tmp_path / "supervisord.conf",
+        "[program:selfbot]\ncommand=/opt/venv/bin/python self.py\n",
+    )
+    bot.config = dataclasses.replace(
+        bot.config,
+        supervisor=dataclasses.replace(
+            bot.config.supervisor,
+            process_name="selfbot",
+            config_path=str(config),
+        ),
+    )
+
+    event = FakeEvent(raw_text="self diag")
+    await registry.dispatch(bot, event, "self diag")
+
+    output = " ".join(event.replies)
+    assert "self.py" in output
+    assert "-m selfbot" in output

@@ -16,6 +16,7 @@ from ..services.supervisor import (
     STATE_EMOJI,
     SupervisorNotFound,
     SupervisorRunner,
+    audit_program,
     describe_discovery,
     parse_state,
     resolve_supervisorctl,
@@ -332,6 +333,32 @@ async def _supervisor_diag(ctx: Context) -> None:
             "  • `pip install supervisor` in the bot's virtualenv, or\n"
             "  • set `SUPERVISOR_CTL=/full/path/to/supervisorctl` in .env"
         )
+
+    # Verify the program section will actually restart *this* version.
+    if supervisor.process_name:
+        audit = await asyncio.to_thread(
+            audit_program, supervisor.process_name, supervisor.config_path
+        )
+        lines.append(f"\n**`[program:{supervisor.process_name}]`**")
+
+        if not audit.found:
+            lines.append(
+                "  ❓ Not found in the config I could read.\n"
+                "  If `self status` works, supervisord is reading a different\n"
+                "  file — set `SUPERVISOR_CONFIG` to it."
+            )
+        else:
+            lines.append(f"  Config: `{audit.config_file}`")
+            lines.append(f"  Command: `{truncate(audit.command or '(unset)', 160)}`")
+            if audit.directory:
+                lines.append(f"  Directory: `{audit.directory}`")
+
+            for problem in audit.problems:
+                lines.append(f"  ❌ {problem}")
+            for note in audit.notes:
+                lines.append(f"  ⚠️ {note}")
+            if not audit.problems and not audit.notes:
+                lines.append("  ✅ Looks correct for v2.")
 
     await ctx.reply("\n".join(lines))
 

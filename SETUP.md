@@ -332,6 +332,17 @@ Find the path with `which supervisorctl` or
 doesn't match your `[program:NAME]`. Run `supervisorctl status` to see the
 real names.
 
+**⚠️ Upgrading from v1?** v1 was launched with `python self.py`, and that file
+no longer exists. If your `[program:selfbot]` still references it, `self
+restart` will stop the bot and fail to start it again. `self diag` checks this
+for you and prints ❌ if the command is stale — update it to:
+
+```ini
+command=/home/youruser/Selfbot/.venv/bin/python -m selfbot
+```
+
+then `supervisorctl reread && supervisorctl update`.
+
 **Non-default config location?** Only then do you need:
 
 ```env
