@@ -66,7 +66,12 @@ where = ["src"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-q --strict-markers"
-filterwarnings = ["ignore::DeprecationWarning"]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    # pytest-asyncio closes its loop before asyncio's subprocess transport
+    # finalizer runs. Harmless teardown noise, not a leak in our code.
+    "ignore::pytest.PytestUnraisableExceptionWarning",
+]
 
 [tool.ruff]
 line-length = 100

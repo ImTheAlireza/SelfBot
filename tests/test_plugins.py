@@ -65,9 +65,20 @@ async def test_self_off_then_on(bot, registry):
 
 @pytest.mark.asyncio
 async def test_self_restart_without_supervisor_is_graceful(bot, registry):
+    """No SUPERVISOR_PROCESS configured -> actionable hint, not a crash."""
     event = FakeEvent(raw_text="self restart")
     await registry.dispatch(bot, event, "self restart")
-    assert any("Supervisor is not configured" in r for r in event.replies)
+    assert any("SUPERVISOR_PROCESS" in r for r in event.replies)
+
+
+@pytest.mark.asyncio
+async def test_self_diag_runs_without_configuration(bot, registry):
+    """`self diag` must work even when nothing is set up — that is its job."""
+    event = FakeEvent(raw_text="self diag")
+    await registry.dispatch(bot, event, "self diag")
+    output = " ".join(event.replies)
+    assert "Supervisor diagnostics" in output
+    assert "SUPERVISOR_PROCESS" in output
 
 
 # ---------------------------------------------------------------------------

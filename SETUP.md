@@ -277,14 +277,65 @@ Log in **once interactively** before enabling the service.
 </details>
 
 <details>
-<summary><b>supervisor</b> — enables <code>self restart/status/logs</code></summary>
+<summary><b>supervisor</b> — enables <code>self status/restart/logs</code></summary>
 
-Add to your supervisor config, then set in `.env`:
+**1. Define the program** in your `supervisord.conf`:
+
+```ini
+[program:selfbot]
+command=/home/youruser/Selfbot/.venv/bin/python -m selfbot
+directory=/home/youruser/Selfbot
+autostart=true
+autorestart=true
+stopasgroup=true
+killasgroup=true
+stderr_logfile=/home/youruser/logs/selfbot.err.log
+stdout_logfile=/home/youruser/logs/selfbot.out.log
+```
+
+**2. Point the bot at it** in `.env`:
+
+```env
+SUPERVISOR_PROCESS=selfbot
+SUPERVISOR_LOG_FILE=/home/youruser/logs/selfbot.err.log
+```
+
+`SUPERVISOR_PROCESS` must match the name in `[program:NAME]`. That is normally
+all you need — `supervisorctl` is found automatically, and it locates its own
+config file.
+
+**3. Reload and verify:**
+
+```bash
+supervisorctl reread && supervisorctl update
+```
+
+Then from Telegram: `self status`, `self logs 30`, `self restart`.
+
+**If you get "supervisorctl could not be located":** send `self diag`. It
+prints every location searched and the exact command it would run. Fix with
+whichever applies:
+
+```env
+# Option A — tell the bot exactly where it is
+SUPERVISOR_CTL=/home/youruser/Selfbot/.venv/bin/supervisorctl
+```
+```bash
+# Option B — install it into the bot's own virtualenv
+/home/youruser/Selfbot/.venv/bin/pip install supervisor
+```
+
+Find the path with `which supervisorctl` or
+`find ~ -name supervisorctl -type f 2>/dev/null`.
+
+**If you get "supervisord has no program named ...":** `SUPERVISOR_PROCESS`
+doesn't match your `[program:NAME]`. Run `supervisorctl status` to see the
+real names.
+
+**Non-default config location?** Only then do you need:
 
 ```env
 SUPERVISOR_CONFIG=/home/youruser/supervisord.conf
-SUPERVISOR_PROCESS=selfbot
-SUPERVISOR_LOG_FILE=/home/youruser/logs/selfbot.err.log
 ```
 </details>
 
@@ -311,6 +362,8 @@ Or open it at
 | `Login failed: ApiIdInvalidError` | `TELEGRAM_API_ID`/`TELEGRAM_API_HASH` don't match. Recheck my.telegram.org. |
 | Commands do nothing | Send them from the **same account** the bot logged in as — Saved Messages is easiest. Check the bot isn't paused (`self on`). |
 | `AI is not configured` | Step 8. |
+| `supervisorctl could not be located` | Send `self diag`, then set `SUPERVISOR_CTL` or `pip install supervisor` in the venv. |
+| `supervisord has no program named X` | `SUPERVISOR_PROCESS` must match `[program:NAME]`. Check with `supervisorctl status`. |
 | Persian shows as boxes | Step 9. |
 | `database is locked` | Two instances are running. `pkill -f "python -m selfbot"` and start one. |
 | Need to re-login | Delete `data/*.session` and run `--login` again. |

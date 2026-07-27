@@ -5,11 +5,21 @@ from __future__ import annotations
 import asyncio
 import logging
 import platform
+import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 from ..errors import UsageError, ValidationError
 from ..registry import Context, command
+from ..services.supervisor import (
+    STATE_EMOJI,
+    SupervisorNotFound,
+    SupervisorRunner,
+    describe_discovery,
+    parse_state,
+    resolve_supervisorctl,
+)
 from ..utils.text import format_duration, truncate
 
 logger = logging.getLogger(__name__)
@@ -98,18 +108,19 @@ async def cmd_status(ctx: Context) -> None:
     "self",
     category=CATEGORY,
     sudo_only=True,
-    usage="self <on|off|restart|status|logs> [n]",
-    examples=("self off", "self logs 50"),
+    usage="self <on|off|restart|status|logs|diag> [n]",
+    examples=("self off", "self status", "self logs 50", "self diag"),
 )
 async def cmd_self(ctx: Context) -> None:
-    """Control the bot process: on, off, restart, status, logs."""
+    """Control the bot process: on, off, restart, status, logs, diag."""
     if not ctx.args:
         raise UsageError(
-            "Usage: `self <on|off|restart|status|logs>`\n"
+            "Usage: `self <on|off|restart|status|logs|diag>`\n"
             "• `on` / `off` — enable or pause command handling\n"
             "• `restart` — restart via supervisor\n"
             "• `status` — supervisor process state\n"
-            "• `logs [n]` — tail the error log"
+            "• `logs [n]` — tail the error log\n"
+            "• `diag` — troubleshoot supervisor setup"
         )
 
     action = ctx.args[0].lower()
@@ -126,8 +137,13 @@ async def cmd_self(ctx: Context) -> None:
         await _supervisor_status(ctx)
     elif action == "logs":
         await _supervisor_logs(ctx)
+    elif action in {"diag", "diagnose", "doctor"}:
+        await _supervisor_diag(ctx)
     else:
-        raise ValidationError(f"Unknown action `{action}`. Use on/off/restart/status/logs.")
+        raise ValidationError(
+            f"Unknown action `{action}`. "
+            "Use on/off/restart/status/logs/diag."
+        )
 
 
 async def _run(*args: str, timeout: float = 30.0) -> tuple[int, str, str]:
@@ -149,80 +165,175 @@ async def _run(*args: str, timeout: float = 30.0) -> tuple[int, str, str]:
     )
 
 
-def _require_supervisor(ctx: Context) -> None:
-    if not ctx.config.supervisor.enabled:
+def _runner(ctx: Context) -> SupervisorRunner:
+    """Build a supervisor runner from config, or explain why we cannot."""
+    supervisor = ctx.config.supervisor
+    if not supervisor.enabled:
         raise UsageError(
-            "Supervisor is not configured. Set `SUPERVISOR_CONFIG` and "
-            "`SUPERVISOR_PROCESS` in your .env to use this."
+            "Set `SUPERVISOR_PROCESS` in your .env to the program name from "
+            "your supervisord config, then restart the bot."
         )
+    return SupervisorRunner(
+        process_name=supervisor.process_name,
+        config_path=supervisor.config_path,
+        executable=supervisor.executable,
+    )
+
+
+def _not_found_help(ctx: Context, exc: SupervisorNotFound) -> str:
+    return (
+        f"❌ {exc}\n\n"
+        f"Run `{ctx.config.command_prefix}self diag` to see everywhere I looked."
+    )
 
 
 async def _supervisor_restart(ctx: Context) -> None:
-    _require_supervisor(ctx)
+    runner = _runner(ctx)
+
+    # Fail fast: locating the binary before asking for confirmation avoids
+    # prompting the user for a restart that cannot happen.
+    try:
+        runner.resolve()
+    except SupervisorNotFound as exc:
+        await ctx.reply(_not_found_help(ctx, exc))
+        return
+
     if not await ctx.bot.confirm(ctx.event, "⚠️ Restart the bot?"):
         await ctx.reply("👍 Cancelled.")
         return
 
-    await ctx.reply("🔄 Restarting…")
-    supervisor = ctx.config.supervisor
+    await ctx.reply(
+        f"🔄 Restarting `{runner.process_name}`…\n"
+        "I'll go offline for a few seconds."
+    )
+
     try:
-        code, _out, err = await _run(
-            "supervisorctl", "-c", supervisor.config_path,
-            "restart", supervisor.process_name,
-        )
-        if code != 0:
-            await ctx.reply(f"❌ Restart failed:\n`{truncate(err, 500)}`")
+        result = await runner.restart()
     except asyncio.TimeoutError:
-        await ctx.reply("❌ Restart timed out. Check `self status`.")
-    except FileNotFoundError:
-        await ctx.reply("❌ `supervisorctl` not found on PATH.")
+        # Expected: supervisord kills this process mid-command on success.
+        logger.info("supervisorctl restart timed out (likely restarting now)")
+        return
+    except SupervisorNotFound as exc:
+        await ctx.reply(_not_found_help(ctx, exc))
+        return
+    except OSError as exc:
+        await ctx.reply(f"❌ Could not run supervisorctl: `{exc}`")
+        return
+
+    if not result.ok:
+        await ctx.reply(
+            f"❌ Restart failed (exit {result.returncode}):\n"
+            f"`{truncate(result.output or 'no output', 500)}`"
+        )
+    elif result.output:
+        logger.info("supervisorctl restart: %s", result.output)
 
 
 async def _supervisor_status(ctx: Context) -> None:
-    _require_supervisor(ctx)
-    supervisor = ctx.config.supervisor
-    try:
-        code, out, err = await _run(
-            "supervisorctl", "-c", supervisor.config_path,
-            "status", supervisor.process_name,
-        )
-    except FileNotFoundError:
-        raise UsageError("`supervisorctl` not found on PATH.") from None
-    except asyncio.TimeoutError:
-        raise UsageError("supervisorctl timed out.") from None
+    runner = _runner(ctx)
 
-    if code != 0 and not out:
-        await ctx.reply(f"❌ Could not read status:\n`{truncate(err, 500)}`")
+    try:
+        result = await runner.status()
+    except SupervisorNotFound as exc:
+        await ctx.reply(_not_found_help(ctx, exc))
+        return
+    except asyncio.TimeoutError:
+        await ctx.reply("❌ supervisorctl timed out. Is supervisord running?")
+        return
+    except OSError as exc:
+        await ctx.reply(f"❌ Could not run supervisorctl: `{exc}`")
         return
 
-    emoji = next(
-        (e for token, e in (
-            ("RUNNING", "✅"), ("STARTING", "🔄"),
-            ("STOPPED", "⏹"), ("FATAL", "❌"),
-        ) if token in out),
-        "❓",
+    output = result.output or "(no output)"
+
+    # A non-zero exit with usable output still tells the user something.
+    if not result.ok and "no such process" in output.lower():
+        await ctx.reply(
+            f"❓ supervisord has no program named `{runner.process_name}`.\n\n"
+            f"Check `SUPERVISOR_PROCESS` matches the `[program:...]` section "
+            f"in your supervisord config."
+        )
+        return
+
+    state = parse_state(output)
+    emoji = STATE_EMOJI.get(state, "❓")
+
+    await ctx.reply(
+        f"{emoji} **{runner.process_name}** — {state}\n\n"
+        f"```\n{truncate(output, 800)}\n```\n"
+        f"Bot uptime: `{format_duration(ctx.bot.uptime)}`"
     )
-    await ctx.reply(f"{emoji} **Process status**\n```\n{truncate(out, 1000)}\n```")
 
 
 async def _supervisor_logs(ctx: Context) -> None:
     log_file = ctx.config.supervisor.log_file
     if not log_file:
-        raise UsageError("Set `SUPERVISOR_LOG_FILE` in your .env to read logs.")
+        raise UsageError(
+            "Set `SUPERVISOR_LOG_FILE` in your .env to the path of your "
+            "stderr log to read it from here."
+        )
 
     lines = 20
     if len(ctx.args) > 1 and ctx.args[1].isdigit():
         lines = min(int(ctx.args[1]), 200)
 
+    path = Path(log_file).expanduser()  # noqa: ASYNC240 - pure string work
+    if not await asyncio.to_thread(path.is_file):
+        raise UsageError(f"Log file not found: `{path}`")
+
     try:
-        code, out, err = await _run("tail", "-n", str(lines), log_file)
+        code, out, err = await _run("tail", "-n", str(lines), str(path))
     except FileNotFoundError:
-        raise UsageError("`tail` not found on PATH.") from None
+        # No `tail` (unusual, but possible in slim containers): read directly.
+        try:
+            content = await asyncio.to_thread(
+                path.read_text, encoding="utf-8", errors="replace"
+            )
+            out, code, err = "\n".join(content.splitlines()[-lines:]), 0, ""
+        except OSError as exc:
+            raise UsageError(f"Could not read the log: `{exc}`") from None
 
     if code != 0:
         await ctx.reply(f"❌ Could not read logs:\n`{truncate(err, 400)}`")
         return
     await ctx.reply(f"📋 **Last {lines} lines**\n```\n{out or '(empty)'}\n```")
+
+
+async def _supervisor_diag(ctx: Context) -> None:
+    """Report exactly how supervisorctl is being located."""
+    supervisor = ctx.config.supervisor
+
+    lines = [
+        "🔧 **Supervisor diagnostics**\n",
+        "**Configuration**",
+        f"  `SUPERVISOR_PROCESS` = `{supervisor.process_name or '(unset)'}`",
+        f"  `SUPERVISOR_CONFIG`  = `{supervisor.config_path or '(unset — auto)'}`",
+        f"  `SUPERVISOR_CTL`     = `{supervisor.executable or '(unset — auto)'}`",
+        f"  `SUPERVISOR_LOG_FILE`= `{supervisor.log_file or '(unset)'}`",
+        "",
+        "**Discovery**",
+        describe_discovery(supervisor.executable),
+        "",
+        f"**Interpreter**\n  `{sys.executable}`",
+    ]
+
+    resolved = resolve_supervisorctl(supervisor.executable)
+    if resolved:
+        runner = _runner(ctx) if supervisor.enabled else None
+        lines.append("\n**Command I will run**")
+        if runner is not None:
+            lines.append(f"  `{' '.join(runner.build_command('status', runner.process_name))}`")
+        else:
+            lines.append(f"  `{' '.join(resolved)}` (set SUPERVISOR_PROCESS to enable)")
+    else:
+        lines.append(
+            "\n⚠️ **supervisorctl was not found.**\n"
+            "Fix with either:\n"
+            "  • `pip install supervisor` in the bot's virtualenv, or\n"
+            "  • set `SUPERVISOR_CTL=/full/path/to/supervisorctl` in .env"
+        )
+
+    await ctx.reply("\n".join(lines))
 
 
 # ---------------------------------------------------------------------------

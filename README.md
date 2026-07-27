@@ -4,7 +4,7 @@
 
 **An asynchronous, plugin-based Telegram self-bot built on Telethon.**
 
-[![Tests](https://img.shields.io/badge/tests-173%20passing-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-202%20passing-brightgreen)](tests/)
 [![Ruff](https://img.shields.io/badge/lint-ruff%20clean-brightgreen)](pyproject.toml)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
@@ -90,6 +90,7 @@ Everything is environment-driven; no secret ever goes in source. See
 | `AI_API_KEY` | | — | Key for the chosen provider |
 | `AI_BASE_URL` | | — | Point at any OpenAI-compatible server |
 | `LOG_CHANNEL_ID` | | — | Mirror warnings/errors to a private channel |
+| `SUPERVISOR_PROCESS` | | `selfbot` | Enables `self status` / `self restart` |
 | `MAX_FILE_SIZE_MB` | | `512` | Ceiling on downloads and uploads |
 
 <details>
@@ -129,7 +130,7 @@ Commands are typed as plain messages from your own account. Set
 | `ping` | Round-trip latency |
 | `whoami` | Your user ID, role and the current chat ID |
 | `status` | Uptime, provider and runtime counters |
-| `self on\|off\|restart\|status\|logs [n]` | 👑 Process control |
+| `self on\|off\|restart\|status\|logs\|diag` | 👑 Process control and supervisor troubleshooting |
 
 ### Admin 👑
 | Command | Description |
@@ -241,7 +242,7 @@ usage hint rather than a traceback.
 ```bash
 pip install -e ".[dev,full]"
 
-pytest                      # 173 tests
+pytest                      # 202 tests
 pytest --cov=selfbot        # with coverage
 ruff check src tests        # lint
 mypy src/selfbot            # type check

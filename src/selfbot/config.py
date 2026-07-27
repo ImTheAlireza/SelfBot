@@ -121,10 +121,13 @@ class SupervisorConfig:
     config_path: str
     process_name: str
     log_file: str
+    executable: str
 
     @property
     def enabled(self) -> bool:
-        return bool(self.config_path and self.process_name)
+        # Only the process name is essential. supervisorctl locates its own
+        # config when -c is omitted, and the executable is auto-discovered.
+        return bool(self.process_name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,6 +294,7 @@ def load_config(
         config_path=_env("SUPERVISOR_CONFIG"),
         process_name=_env("SUPERVISOR_PROCESS", "selfbot"),
         log_file=_env("SUPERVISOR_LOG_FILE"),
+        executable=_env("SUPERVISOR_CTL"),
     )
 
     spam = SpamConfig(

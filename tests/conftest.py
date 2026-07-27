@@ -37,7 +37,9 @@ def config(tmp_path: Path) -> Config:
         ),
         image=ImageConfig(provider="none", api_key="", model="m"),
         sticker=StickerConfig(bot_token="", bot_username="", watermark=""),
-        supervisor=SupervisorConfig(config_path="", process_name="", log_file=""),
+        supervisor=SupervisorConfig(
+            config_path="", process_name="", log_file="", executable=""
+        ),
         spam=SpamConfig(delay=0.0, limit=10, cooldown=0.0),
         sudo_user_id=SUDO_ID,
         database_url=f"sqlite+aiosqlite:///{tmp_path / 'test.db'}",
