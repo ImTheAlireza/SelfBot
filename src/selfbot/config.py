@@ -154,6 +154,7 @@ class Config:
     log_channel_level: str
     command_prefix: str
     quick_reply_prefix: str
+    startup_notify: str
     rapidapi_key: str
     tts_provider: TTSProvider
     max_file_size_mb: int
@@ -323,6 +324,7 @@ def load_config(
         log_channel_level=_env("LOG_CHANNEL_LEVEL", "WARNING").upper(),
         command_prefix=_env("COMMAND_PREFIX"),
         quick_reply_prefix=_env("QUICK_REPLY_PREFIX", "-") or "-",
+        startup_notify=_env("STARTUP_NOTIFY", "me") or "me",
         rapidapi_key=_env("RAPIDAPI_KEY"),
         tts_provider=_env_choice("TTS_PROVIDER", {"rapidapi", "none"}, "none"),  # type: ignore[arg-type]
         max_file_size_mb=_env_int("MAX_FILE_SIZE_MB", 512) or 512,

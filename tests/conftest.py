@@ -49,6 +49,7 @@ def config(tmp_path: Path) -> Config:
         log_channel_level="WARNING",
         command_prefix="",
         quick_reply_prefix="-",
+        startup_notify="off",
         rapidapi_key="",
         tts_provider="none",
         max_file_size_mb=8,

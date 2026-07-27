@@ -84,6 +84,11 @@ project directory, then start it again.
 
 From Telegram:
 
+After `supervisorctl start selfbot`, the bot posts an **online** summary to
+your Saved Messages within a few seconds — that is the quickest confirmation
+a restart worked. Set `STARTUP_NOTIFY=off` in `.env` to silence it, or to a
+chat ID to send it elsewhere.
+
 | Command | Expected |
 |---|---|
 | `self diag` | ✅ on every line, and `✅ Looks correct for v2.` |

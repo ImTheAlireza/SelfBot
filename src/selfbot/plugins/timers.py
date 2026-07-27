@@ -162,8 +162,11 @@ async def start_timer_task(bot: object, timer_hash: str) -> None:
     bot.timer_tasks[timer_hash] = task  # type: ignore[attr-defined]
 
 
-async def restore_timers(bot: object) -> None:
-    """Re-arm every active timer after a restart."""
+async def restore_timers(bot: object) -> tuple[int, int]:
+    """Re-arm every active timer after a restart.
+
+    Returns ``(restored, expired)`` so the caller can report real numbers.
+    """
     timers = await bot.db.list_active_timers()  # type: ignore[attr-defined]
     restored = expired = 0
     for timer in timers:
@@ -175,6 +178,7 @@ async def restore_timers(bot: object) -> None:
             expired += 1
     if restored or expired:
         logger.info("Timers restored: %d active, %d expired", restored, expired)
+    return restored, expired
 
 
 @command(

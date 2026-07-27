@@ -13,6 +13,7 @@ import logging
 import sys
 import time
 from collections.abc import Awaitable
+from datetime import datetime, timezone
 from typing import Any
 
 from telethon import TelegramClient, events, functions, types
@@ -137,10 +138,80 @@ class SelfBot:
             )
 
         self._attach_telegram_logging()
-        await self._restore_timers()
+        restored, expired = await self._restore_timers()
         self._spawn(self._janitor(), name="janitor")
 
         logger.info("Ready — %d commands registered", len(self.registry))
+        await self._announce_online(restored, expired)
+
+    async def _announce_online(self, timers_restored: int, timers_expired: int) -> None:
+        """Post a startup summary so you know the bot is back.
+
+        Sent to Saved Messages by default; set STARTUP_NOTIFY to `off`, or to
+        a chat ID, to change that. Never fatal — a bot that cannot post its
+        own greeting should still run.
+        """
+        target = self.config.startup_notify
+        if target == "off":
+            return
+
+        started = datetime.now(timezone.utc)
+        boot_seconds = time.monotonic() - self.started_at
+
+        lines = [
+            "🤖 **SelfBot online**",
+            "",
+            f"👤 {self._describe_account()}",
+            f"⚡ {len(self.registry)} commands · 🗄 {self.db.backend}",
+            f"🧠 AI: {self.ai.name} · 🎨 images: {self.image_ai.name}",
+        ]
+
+        if timers_restored or timers_expired:
+            timer_bits = []
+            if timers_restored:
+                timer_bits.append(f"{timers_restored} resumed")
+            if timers_expired:
+                timer_bits.append(f"{timers_expired} expired")
+            lines.append(f"⏰ Timers: {', '.join(timer_bits)}")
+
+        lines += [
+            f"🕐 {started:%Y-%m-%d %H:%M:%S} UTC · ready in {boot_seconds:.1f}s",
+            "",
+            "Type `help` to get started.",
+        ]
+
+        message = "\n".join(lines)
+
+        try:
+            entity = "me" if target == "me" else int(target)
+            await self.client.send_message(entity, message)
+        except ValueError:
+            logger.warning(
+                "STARTUP_NOTIFY=%r is not 'me', 'off' or a chat ID; "
+                "sending to Saved Messages instead",
+                target,
+            )
+            try:
+                await self.client.send_message("me", message)
+            except Exception:
+                logger.warning("Could not send the startup message", exc_info=True)
+        except Exception:
+            logger.warning("Could not send the startup message", exc_info=True)
+
+    def _describe_account(self) -> str:
+        name = " ".join(
+            filter(
+                None,
+                [
+                    getattr(self.me, "first_name", "") or "",
+                    getattr(self.me, "last_name", "") or "",
+                ],
+            )
+        ).strip()
+        username = getattr(self.me, "username", None)
+        if username:
+            return f"{name or 'You'} (@{username})"
+        return name or f"ID {getattr(self.me, 'id', '?')}"
 
     async def _sign_in(self) -> None:
         """Authenticate, failing loudly when running unattended.
@@ -405,13 +476,14 @@ class SelfBot:
 
     # -- background --------------------------------------------------------
 
-    async def _restore_timers(self) -> None:
+    async def _restore_timers(self) -> tuple[int, int]:
         from .plugins.timers import restore_timers
 
         try:
-            await restore_timers(self)
+            return await restore_timers(self)
         except Exception:
             logger.exception("Could not restore timers")
+            return 0, 0
 
     async def _janitor(self) -> None:
         """Periodic housekeeping: temp files and stale timer rows."""
