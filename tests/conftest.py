@@ -186,6 +186,8 @@ class FakeBot:
         self.ai = _NamedStub("none")
         self.image_ai = _NamedStub("none")
         self.http = None
+        self._auto_reply_cache: dict[int, list[Any]] = {}
+        self.auto_reply_cache_invalidated: list[int | None] = []
         self.reaction_cache_invalidated = False
 
     def is_sudo(self, event: Any) -> bool:
@@ -205,6 +207,13 @@ class FakeBot:
     async def confirm(self, event: Any, prompt: str, **_kwargs: Any) -> bool:
         self.confirm_prompts.append(prompt)
         return self.confirm_result
+
+    def invalidate_auto_reply_cache(self, chat_id: int | None = None) -> None:
+        self.auto_reply_cache_invalidated.append(chat_id)
+        if chat_id is None:
+            self._auto_reply_cache.clear()
+        else:
+            self._auto_reply_cache.pop(chat_id, None)
 
     def invalidate_reaction_cache(self) -> None:
         self.reaction_cache_invalidated = True

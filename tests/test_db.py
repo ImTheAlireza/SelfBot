@@ -64,6 +64,39 @@ async def test_quick_replies_are_per_user(db):
 
 
 @pytest.mark.asyncio
+async def test_auto_reply_crud(db):
+    await db.set_auto_reply(-100, "contain", "hello", "hi there")
+
+    rules = await db.list_auto_replies(-100)
+    assert len(rules) == 1
+    assert rules[0].chat_id == -100
+    assert rules[0].mode == "contain"
+    assert rules[0].trigger == "hello"
+    assert rules[0].reply_text == "hi there"
+
+    await db.set_auto_reply(-100, "contain", "hello", "updated")
+    rules = await db.list_auto_replies(-100)
+    assert len(rules) == 1
+    assert rules[0].reply_text == "updated"
+
+    assert await db.delete_auto_reply(-100, "contain", "hello") == 1
+    assert await db.list_auto_replies(-100) == []
+
+
+@pytest.mark.asyncio
+async def test_auto_replies_are_per_chat(db):
+    await db.set_auto_reply(-100, "match", "ping", "pong one")
+    await db.set_auto_reply(-200, "match", "ping", "pong two")
+
+    rules_one = await db.list_auto_replies(-100)
+    rules_two = await db.list_auto_replies(-200)
+    assert len(rules_one) == 1
+    assert len(rules_two) == 1
+    assert rules_one[0].reply_text == "pong one"
+    assert rules_two[0].reply_text == "pong two"
+
+
+@pytest.mark.asyncio
 async def test_reaction_crud(db):
     await db.set_reaction("channelone", "🔥")
     assert await db.list_reactions() == {"channelone": "🔥"}

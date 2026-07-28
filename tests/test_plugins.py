@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from conftest import SUDO_ID, FakeEvent, FakeMessage
+from conftest import SUDO_ID, FakeClient, FakeEvent, FakeMessage
+from selfbot.bot import SelfBot
 from selfbot.db import Timer, utcnow
 from selfbot.plugins.timers import render_finished, render_timer
 from selfbot.plugins.utilities import _scrape_tgju, _weather_icon
@@ -145,6 +146,87 @@ async def test_qreply_from_replied_message(bot, registry, db):
     )
     await registry.dispatch(bot, event, event.raw_text)
     assert await db.get_quick_reply(SUDO_ID, "saved") == "captured text"
+
+
+# ---------------------------------------------------------------------------
+# Auto replies
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_setautoreply_list_and_remove(bot, registry, db):
+    event = FakeEvent(
+        raw_text='setautoreply contain "hello there" "General Kenobi"',
+        chat_id=-100,
+    )
+    await registry.dispatch(bot, event, event.raw_text)
+
+    rules = await db.list_auto_replies(-100)
+    assert len(rules) == 1
+    assert rules[0].mode == "contain"
+    assert rules[0].trigger == "hello there"
+    assert rules[0].reply_text == "General Kenobi"
+    assert bot.auto_reply_cache_invalidated == [-100]
+
+    event = FakeEvent(raw_text="autoreplylist", chat_id=-100)
+    await registry.dispatch(bot, event, event.raw_text)
+    assert any("hello there" in r for r in event.replies)
+
+    event = FakeEvent(
+        raw_text='remautoreply contain "hello there"',
+        chat_id=-100,
+    )
+    await registry.dispatch(bot, event, event.raw_text)
+    assert await db.list_auto_replies(-100) == []
+
+
+@pytest.mark.asyncio
+async def test_autoreply_only_triggers_in_the_configured_chat(config, registry, db):
+    bot = SelfBot(config, registry=registry, client=FakeClient(), db=db)
+    await db.set_auto_reply(-100, "contain", "hello", "hi there")
+
+    event = FakeEvent(raw_text="well hello friend", out=False, sender_id=999, chat_id=-100)
+    assert await bot._try_auto_reply(event, event.raw_text)
+    assert event.replies == ["hi there"]
+
+    other = FakeEvent(raw_text="well hello friend", out=False, sender_id=999, chat_id=-200)
+    assert not await bot._try_auto_reply(other, other.raw_text)
+    assert other.replies == []
+
+
+@pytest.mark.asyncio
+async def test_autoreply_match_beats_contain(config, registry, db):
+    bot = SelfBot(config, registry=registry, client=FakeClient(), db=db)
+    await db.set_auto_reply(-100, "contain", "ping", "generic")
+    await db.set_auto_reply(-100, "match", "ping", "exact")
+
+    event = FakeEvent(raw_text="ping", out=False, sender_id=999, chat_id=-100)
+    assert await bot._try_auto_reply(event, event.raw_text)
+    assert event.replies == ["exact"]
+
+
+@pytest.mark.asyncio
+async def test_autoreply_contain_requires_word_boundaries_for_persian(config, registry, db):
+    bot = SelfBot(config, registry=registry, client=FakeClient(), db=db)
+    await db.set_auto_reply(-100, "contain", "سلام", "درود")
+
+    embedded = FakeEvent(raw_text="سلامتی", out=False, sender_id=999, chat_id=-100)
+    assert not await bot._try_auto_reply(embedded, embedded.raw_text)
+    assert embedded.replies == []
+
+    isolated = FakeEvent(raw_text="سلام رفیق", out=False, sender_id=999, chat_id=-100)
+    assert await bot._try_auto_reply(isolated, isolated.raw_text)
+    assert isolated.replies == ["درود"]
+
+
+@pytest.mark.asyncio
+async def test_autoreply_contain_allows_punctuation_around_word(config, registry, db):
+    bot = SelfBot(config, registry=registry, client=FakeClient(), db=db)
+    await db.set_auto_reply(-100, "contain", "hello", "hi")
+
+    event = FakeEvent(raw_text="hello!", out=False, sender_id=999, chat_id=-100)
+    assert await bot._try_auto_reply(event, event.raw_text)
+    assert event.replies == ["hi"]
 
 
 # ---------------------------------------------------------------------------

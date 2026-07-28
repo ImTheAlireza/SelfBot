@@ -24,7 +24,14 @@ from .errors import ConfigError
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["Database", "QuickReply", "StickerPack", "Timer", "utcnow"]
+__all__ = [
+    "AutoReply",
+    "Database",
+    "QuickReply",
+    "StickerPack",
+    "Timer",
+    "utcnow",
+]
 
 
 def utcnow() -> datetime:
@@ -101,6 +108,15 @@ class Timer:
 class QuickReply:
     alias: str
     message: str
+    created_at: datetime | None = None
+
+
+@dataclass(slots=True)
+class AutoReply:
+    chat_id: int
+    mode: str
+    trigger: str
+    reply_text: str
     created_at: datetime | None = None
 
 
@@ -305,6 +321,16 @@ class Database:
                 )
                 """,
                 """
+                CREATE TABLE IF NOT EXISTS auto_replies (
+                    chat_id INTEGER NOT NULL,
+                    mode TEXT NOT NULL,
+                    trigger_text TEXT NOT NULL,
+                    reply_text TEXT NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (chat_id, mode, trigger_text)
+                )
+                """,
+                """
                 CREATE TABLE IF NOT EXISTS timers (
                     hash TEXT PRIMARY KEY,
                     user_id INTEGER NOT NULL,
@@ -352,6 +378,16 @@ class Database:
                     message TEXT NOT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (user_id, alias)
+                ) {charset}
+                """,
+                f"""
+                CREATE TABLE IF NOT EXISTS auto_replies (
+                    chat_id BIGINT NOT NULL,
+                    mode VARCHAR(16) NOT NULL,
+                    trigger_text VARCHAR(255) NOT NULL,
+                    reply_text TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (chat_id, mode, trigger_text)
                 ) {charset}
                 """,
                 f"""
@@ -467,6 +503,56 @@ class Database:
             )
             for row in rows
         ]
+
+    # -- auto replies ------------------------------------------------------
+
+    async def set_auto_reply(
+        self, chat_id: int, mode: str, trigger: str, reply_text: str
+    ) -> None:
+        exists = await self.fetch_one(
+            "SELECT trigger_text FROM auto_replies "
+            "WHERE chat_id = %s AND mode = %s AND trigger_text = %s",
+            (chat_id, mode, trigger),
+        )
+        if exists:
+            await self.execute(
+                "UPDATE auto_replies SET reply_text = %s "
+                "WHERE chat_id = %s AND mode = %s AND trigger_text = %s",
+                (reply_text, chat_id, mode, trigger),
+            )
+        else:
+            await self.execute(
+                "INSERT INTO auto_replies (chat_id, mode, trigger_text, reply_text) "
+                "VALUES (%s, %s, %s, %s)",
+                (chat_id, mode, trigger, reply_text),
+            )
+
+    async def delete_auto_reply(self, chat_id: int, mode: str, trigger: str) -> int:
+        return await self.execute(
+            "DELETE FROM auto_replies WHERE chat_id = %s AND mode = %s AND trigger_text = %s",
+            (chat_id, mode, trigger),
+        )
+
+    async def list_auto_replies(self, chat_id: int) -> list[AutoReply]:
+        rows = await self.fetch_all(
+            "SELECT chat_id, mode, trigger_text, reply_text, created_at FROM auto_replies "
+            "WHERE chat_id = %s",
+            (chat_id,),
+        )
+        rules = [
+            AutoReply(
+                chat_id=int(row["chat_id"]),
+                mode=row["mode"],
+                trigger=row["trigger_text"],
+                reply_text=row["reply_text"],
+                created_at=_as_aware(row.get("created_at")),
+            )
+            for row in rows
+        ]
+        return sorted(
+            rules,
+            key=lambda rule: (rule.mode != "match", -len(rule.trigger), rule.trigger.casefold()),
+        )
 
     # -- reactions ---------------------------------------------------------
 
