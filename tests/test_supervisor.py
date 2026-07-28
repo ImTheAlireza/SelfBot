@@ -287,7 +287,8 @@ async def test_status_command_without_process_name_explains(bot, registry):
 
 
 @pytest.mark.asyncio
-async def test_restart_command_asks_before_acting(bot, registry, stub_ctl):
+async def test_restart_command_acts_directly(bot, registry, stub_ctl):
+    """Restart now runs without a confirmation prompt."""
     import dataclasses
 
     bot.config = dataclasses.replace(
@@ -298,20 +299,19 @@ async def test_restart_command_asks_before_acting(bot, registry, stub_ctl):
             executable=str(stub_ctl),
         ),
     )
-    bot.confirm_result = False
 
     event = FakeEvent(raw_text="self restart")
     await registry.dispatch(bot, event, "self restart")
 
-    assert bot.confirm_prompts, "user should have been asked"
-    assert any("Cancelled" in r for r in event.replies)
+    assert not bot.confirm_prompts, "restart should not ask for confirmation"
+    assert any("Restarting" in r for r in event.replies)
 
 
 @pytest.mark.asyncio
 async def test_restart_does_not_prompt_when_ctl_is_missing(
     bot, registry, isolated_env, monkeypatch
 ):
-    """Don't ask to restart if we already know we cannot."""
+    """Don't attempt restart if we already know we cannot."""
     import dataclasses
 
     monkeypatch.setattr(sup.sys, "executable", str(isolated_env / "nowhere" / "python"))

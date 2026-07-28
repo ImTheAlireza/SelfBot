@@ -308,45 +308,43 @@ def _wrap(text: str, page: object, font: str, size: int, max_width: float) -> li
 
 
 # ---------------------------------------------------------------------------
-# Weather
+# Weather (wttr.in — wraps AccuWeather and other accurate sources)
 # ---------------------------------------------------------------------------
 
-WEATHER_ICONS = {
-    (0,): "☀️", (1, 2): "🌤", (3,): "☁️", (45, 48): "🌫",
-    (51, 53, 55, 56, 57): "🌦", (61, 63, 65, 66, 67): "🌧",
-    (71, 73, 75, 77): "❄️", (80, 81, 82): "🌦",
-    (85, 86): "🌨", (95, 96, 99): "⛈",
-}
-
-WEATHER_TEXT = {
-    0: "Clear", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast",
-    45: "Fog", 48: "Rime fog", 51: "Light drizzle", 53: "Drizzle",
-    55: "Heavy drizzle", 56: "Freezing drizzle", 57: "Freezing drizzle",
-    61: "Light rain", 63: "Rain", 65: "Heavy rain", 66: "Freezing rain",
-    67: "Freezing rain", 71: "Light snow", 73: "Snow", 75: "Heavy snow",
-    77: "Snow grains", 80: "Light showers", 81: "Showers",
-    82: "Violent showers", 85: "Snow showers", 86: "Snow showers",
-    95: "Thunderstorm", 96: "Thunderstorm with hail", 99: "Thunderstorm with hail",
+WTTR_ICONS = {
+    "113": "☀️", "116": "🌤", "119": "☁️", "122": "☁️",
+    "143": "🌫", "176": "🌦", "179": "🌧", "182": "🌨",
+    "185": "🌨", "200": "🌦", "227": "❄️", "230": "❄️",
+    "248": "🌫", "260": "🌫", "263": "🌦", "266": "🌧",
+    "281": "🌧", "284": "🌧", "293": "🌧", "296": "🌧",
+    "299": "🌧", "302": "🌧", "305": "🌧", "308": "🌧",
+    "311": "🌧", "314": "🌧", "317": "❄️", "320": "❄️",
+    "323": "❄️", "326": "❄️", "329": "❄️", "332": "❄️",
+    "335": "❄️", "338": "❄️", "350": "🌧", "353": "🌦",
+    "356": "🌧", "359": "🌧", "362": "❄️", "365": "❄️",
+    "368": "❄️", "371": "❄️", "374": "🌧", "377": "❄️",
+    "386": "⛈", "389": "⛈", "392": "⛈", "395": "⛈",
 }
 
 
-def _weather_icon(code: int) -> str:
-    return next((icon for codes, icon in WEATHER_ICONS.items() if code in codes), "🌡")
+def _weather_icon(code: str | int) -> str:
+    """Map a wttr.in weather code to an emoji icon."""
+    return WTTR_ICONS.get(str(code), "🌡")
 
 
-async def _geocode(ctx: Context, city: str) -> tuple[float, float, str]:
-    """Resolve a place name via Open-Meteo's free geocoder (no API key)."""
+async def _wttr_fetch(ctx: Context, city: str) -> dict:
+    """Fetch weather data from wttr.in (wraps AccuWeather and other sources)."""
     data = await ctx.bot.http.get_json(
-        "https://geocoding-api.open-meteo.com/v1/search",
-        params={"name": city, "count": 1, "language": "en", "format": "json"},
-        timeout=15,
+        f"https://wttr.in/{city}",
+        params={"format": "j1"},
+        timeout=20,
     )
-    results = (data or {}).get("results")
-    if not results:
+    if not data:
+        raise ValidationError(f"Could not fetch weather for `{truncate(city, 60)}`.")
+    area = data.get("nearest_area", [{}])
+    if not area:
         raise ValidationError(f"Could not find a place called `{truncate(city, 60)}`.")
-    top = results[0]
-    label = ", ".join(filter(None, [top.get("name"), top.get("country")]))
-    return float(top["latitude"]), float(top["longitude"]), label
+    return data
 
 
 @command(
@@ -358,33 +356,66 @@ async def _geocode(ctx: Context, city: str) -> tuple[float, float, str]:
     examples=("weather Dronten", "weather Tehran"),
 )
 async def cmd_weather(ctx: Context) -> None:
-    """Seven-day forecast for a city."""
+    """Three-day forecast for a city using wttr.in (AccuWeather-based)."""
     city = ctx.raw_args.strip()
     status = await ctx.reply("🌍 Looking up…")
 
-    lat, lon, label = await _geocode(ctx, city)
-    data = await ctx.bot.http.get_json(
-        "https://api.open-meteo.com/v1/forecast",
-        params={
-            "latitude": lat, "longitude": lon,
-            "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
-            "timezone": "auto", "forecast_days": 7,
-        },
-        timeout=20,
-    )
+    try:
+        data = await _wttr_fetch(ctx, city)
+    except ValidationError:
+        raise
+    except Exception as exc:
+        await ctx.bot.edit(status, f"❌ Could not fetch weather: `{exc}`")
+        return
 
-    daily = (data or {}).get("daily") or {}
-    if not daily.get("time"):
-        raise ValidationError("No forecast data available for that location.")
+    area = data["nearest_area"][0]
+    label = ", ".join(filter(None, [
+        area.get("areaName", [{}])[0].get("value", ""),
+        area.get("country", [{}])[0].get("value", ""),
+    ]))
 
-    lines = [f"🌤 **7-day forecast — {label}**\n"]
-    for index, date in enumerate(daily["time"]):
-        code = daily["weather_code"][index]
+    current = data.get("current_condition", [{}])[0]
+    weather_desc = (current.get("weatherDesc", [{}])[0].get("value", "—"))
+    feels = current.get("FeelsLikeC", "?")
+    temp = current.get("temp_C", "?")
+    humidity = current.get("humidity", "?")
+    wind = current.get("windspeedKmph", "?")
+    wind_dir = current.get("winddir16Point", "")
+    vis = current.get("visibility", "?")
+    uv = current.get("uvIndex", "?")
+    precip = current.get("precipMM", "0")
+    icon = _weather_icon(current.get("weatherCode", "113"))
+
+    lines = [
+        f"{icon} **Weather — {label}**\n",
+        f"**Now:** {weather_desc} · {temp}°C (feels {feels}°C)",
+        f"💧 Humidity: {humidity}% · 💨 Wind: {wind} km/h {wind_dir}",
+        f"👁 Visibility: {vis} km · ☀️ UV: {uv} · 🌧 Precip: {precip} mm\n",
+        "**3-day forecast**\n",
+    ]
+
+    for day in data.get("weather", []):
+        date = day.get("date", "?")
+        max_t = day.get("maxtempC", "?")
+        min_t = day.get("mintempC", "?")
+        avg_t = day.get("avgtempC", "?")
+        sun_h = day.get("sunHour", "?")
+        uv_day = day.get("uvIndex", "?")
+        hourly = day.get("hourly", [])
+        if hourly:
+            mid = hourly[4]  # noon entry
+            day_desc = mid.get("weatherDesc", [{}])[0].get("value", "—")
+            day_icon = _weather_icon(mid.get("weatherCode", "113"))
+            precip_pct = mid.get("chanceofrain", "0")
+        else:
+            day_desc = "—"
+            day_icon = "🌡"
+            precip_pct = "0"
+
         lines.append(
-            f"**{date}** {_weather_icon(code)} {WEATHER_TEXT.get(code, '—')}\n"
-            f"  🔺 {daily['temperature_2m_max'][index]}°C  "
-            f"🔻 {daily['temperature_2m_min'][index]}°C  "
-            f"💧 {daily['precipitation_probability_max'][index] or 0}%"
+            f"**{date}** {day_icon} {day_desc}\n"
+            f"  🔺 {max_t}°C  🔻 {min_t}°C  ⛅ {avg_t}°C  "
+            f"💧 {precip_pct}%  ☀️ {sun_h}h  UV {uv_day}"
         )
 
     await status.delete()
@@ -399,40 +430,57 @@ async def cmd_weather(ctx: Context) -> None:
     usage="hourly <city>",
 )
 async def cmd_hourly(ctx: Context) -> None:
-    """Next 24 hours of weather for a city."""
+    """Next 24 hours of weather for a city using wttr.in (AccuWeather-based)."""
     city = ctx.raw_args.strip()
     status = await ctx.reply("🌍 Looking up…")
 
-    lat, lon, label = await _geocode(ctx, city)
-    data = await ctx.bot.http.get_json(
-        "https://api.open-meteo.com/v1/forecast",
-        params={
-            "latitude": lat, "longitude": lon,
-            "hourly": "temperature_2m,weather_code,precipitation_probability",
-            "timezone": "auto", "forecast_days": 2,
-        },
-        timeout=20,
-    )
+    try:
+        data = await _wttr_fetch(ctx, city)
+    except ValidationError:
+        raise
+    except Exception as exc:
+        await ctx.bot.edit(status, f"❌ Could not fetch weather: `{exc}`")
+        return
 
-    hourly = (data or {}).get("hourly") or {}
-    times = hourly.get("time") or []
-    if not times:
-        raise ValidationError("No hourly data available for that location.")
-
-    from datetime import datetime
-
-    now = datetime.now().isoformat()
-    start = next((i for i, t in enumerate(times) if t >= now), 0)
+    area = data["nearest_area"][0]
+    label = ", ".join(filter(None, [
+        area.get("areaName", [{}])[0].get("value", ""),
+        area.get("country", [{}])[0].get("value", ""),
+    ]))
 
     lines = [f"🕐 **Next 24 hours — {label}**\n"]
-    for index in range(start, min(start + 24, len(times))):
-        code = hourly["weather_code"][index]
-        clock = times[index][11:16]
+
+    # wttr.in returns 3 days × 8 hourly slots (00, 03, 06, …, 21).
+    all_hourly: list[dict] = []
+    for day in data.get("weather", []):
+        for hour in day.get("hourly", []):
+            all_hourly.append(hour)
+
+    from datetime import datetime, timezone
+
+    now_hour = datetime.now(timezone.utc).hour
+    shown = 0
+    for entry in all_hourly:
+        hour_num = int(entry.get("time", "0")) // 100
+        # Show entries from the current 3-hour block onwards, up to 24 hours.
+        if hour_num < now_hour - 3 and shown > 0:
+            continue
+        if shown >= 8:
+            break
+
+        clock = f"{hour_num:02d}:00"
+        temp = entry.get("tempC", "?")
+        desc = entry.get("weatherDesc", [{}])[0].get("value", "—")
+        icon = _weather_icon(entry.get("weatherCode", "113"))
+        rain_pct = entry.get("chanceofrain", "0")
+        wind = entry.get("windspeedKmph", "?")
+        feels = entry.get("FeelsLikeC", "?")
+
         lines.append(
-            f"`{clock}` {_weather_icon(code)} "
-            f"{hourly['temperature_2m'][index]}°C · "
-            f"💧{hourly['precipitation_probability'][index] or 0}%"
+            f"`{clock}` {icon} {desc} · {temp}°C (feels {feels}°C) · "
+            f"💧{rain_pct}% · 💨{wind} km/h"
         )
+        shown += 1
 
     await status.delete()
     await ctx.reply("\n".join(lines))

@@ -13,6 +13,12 @@ logger = logging.getLogger(__name__)
 CATEGORY = "Automation"
 
 _AUTO_REPLY_MODES = {"contain", "match"}
+_REPLY_CONDITION_FLAGS = {"-nr", "-sr"}
+_REPLY_CONDITION_LABELS = {
+    "any": "any message",
+    "nr": "non-reply only",
+    "sr": "reply-to-me only",
+}
 
 
 @command(
@@ -20,22 +26,44 @@ _AUTO_REPLY_MODES = {"contain", "match"}
     category=CATEGORY,
     sudo_only=True,
     min_args=3,
-    usage='setautoreply <contain|match> "input" "reply"',
+    usage='setautoreply <contain|match> "input" "reply" [-nr|-sr]',
     examples=(
         'setautoreply contain "hello" "hi there"',
-        'setautoreply match "ping" "pong"',
+        'setautoreply contain "hello" "hi there" -nr',
+        'setautoreply match "ping" "pong" -sr',
     ),
 )
 async def cmd_setautoreply(ctx: Context) -> None:
-    """Auto-reply in the current chat only when a word or phrase matches a rule."""
-    mode = ctx.args[0].lower()
+    """Auto-reply in the current chat only when a word or phrase matches a rule.
+
+    Flags:
+      • (no flag) — reply on any message
+      • `-nr` — only reply if the triggering message is **not** a reply
+      • `-sr` — only reply if the triggering message is a **reply to me**
+    """
+    # Separate flags from positional args.
+    raw_args = list(ctx.args)
+    flags = [a for a in raw_args if a.lower() in _REPLY_CONDITION_FLAGS]
+    positional = [a for a in raw_args if a.lower() not in _REPLY_CONDITION_FLAGS]
+
+    if len(positional) < 3:
+        raise UsageError(
+            'Usage: `setautoreply <contain|match> "input" "reply" [-nr|-sr]`\n\n'
+            "Flags:\n"
+            "• (none) — reply on any message\n"
+            "• `-nr` — only if the message is **not** a reply\n"
+            "• `-sr` — only if the message is a **reply to me**"
+        )
+
+    mode = positional[0].lower()
     if mode not in _AUTO_REPLY_MODES:
         raise ValidationError("Mode must be `contain` or `match`.")
 
-    trigger = (ctx.args[1] or "").strip()
-    reply_text = " ".join(ctx.args[2:]).strip()
+    trigger = (positional[1] or "").strip()
+    reply_text = " ".join(positional[2:]).strip()
+
     if not trigger:
-        raise UsageError('Usage: `setautoreply <contain|match> "input" "reply"`')
+        raise UsageError('Usage: `setautoreply <contain|match> "input" "reply" [-nr|-sr]`')
     if not reply_text:
         raise ValidationError("Reply text cannot be empty.")
     if len(trigger) > 255:
@@ -43,13 +71,21 @@ async def cmd_setautoreply(ctx: Context) -> None:
     if len(reply_text) > 4000:
         raise ValidationError("Reply is too long (max 4000 characters).")
 
-    await ctx.db.set_auto_reply(ctx.chat_id, mode, trigger, reply_text)
+    # Determine reply condition from flags.
+    if len(flags) > 1:
+        raise ValidationError("Only one reply condition flag allowed (`-nr` or `-sr`).")
+    reply_condition = flags[0].lower().lstrip("-") if flags else "any"
+
+    await ctx.db.set_auto_reply(ctx.chat_id, mode, trigger, reply_text, reply_condition=reply_condition)
     ctx.bot.invalidate_auto_reply_cache(ctx.chat_id)
+
+    cond_label = _REPLY_CONDITION_LABELS.get(reply_condition, reply_condition)
     await ctx.reply(
         "✅ Auto-reply saved for **this chat only**.\n"
         f"Mode: `{mode}`\n"
         f"Input: `{trigger}`\n"
-        f"Reply: `{truncate(reply_text, 120)}`"
+        f"Reply: `{truncate(reply_text, 120)}`\n"
+        f"Condition: `{cond_label}`"
     )
 
 
@@ -57,12 +93,32 @@ async def cmd_setautoreply(ctx: Context) -> None:
     "remautoreply",
     category=CATEGORY,
     sudo_only=True,
-    min_args=2,
-    usage='remautoreply <contain|match> "input"',
-    examples=('remautoreply contain "hello"',),
+    min_args=1,
+    usage='remautoreply <contain|match> "input" | remautoreply -allchats',
+    examples=('remautoreply contain "hello"', 'remautoreply -allchats'),
 )
 async def cmd_remautoreply(ctx: Context) -> None:
-    """Remove an auto-reply rule from the current chat."""
+    """Remove an auto-reply rule from the current chat, or all chats.
+
+    Use `-allchats` to wipe every auto-reply across all chats.
+    """
+    # Check for -allchats flag.
+    if ctx.args[0].lower() == "-allchats":
+        rules = await ctx.db.list_all_auto_replies()
+        if not rules:
+            await ctx.reply("ℹ️ No auto-replies exist anywhere.")
+            return
+        count = await ctx.db.delete_all_auto_replies()
+        ctx.bot.invalidate_auto_reply_cache()
+        await ctx.reply(f"✅ Removed **{count}** auto-repl{'y' if count == 1 else 'ies'} across all chats.")
+        return
+
+    if len(ctx.args) < 2:
+        raise UsageError(
+            'Usage: `remautoreply <contain|match> "input"`\n'
+            "Or: `remautoreply -allchats` to remove everywhere."
+        )
+
     mode = ctx.args[0].lower()
     if mode not in _AUTO_REPLY_MODES:
         raise ValidationError("Mode must be `contain` or `match`.")
@@ -92,10 +148,12 @@ async def cmd_autoreplylist(ctx: Context) -> None:
         return
 
     lines = [f"💬 **Auto-replies for this chat** ({len(rules)})\n"]
-    lines += [
-        f"• `{rule.mode}` — `{truncate(rule.trigger, 50)}` → {truncate(rule.reply_text, 60)}"
-        for rule in rules
-    ]
+    for rule in rules:
+        cond_label = _REPLY_CONDITION_LABELS.get(rule.reply_condition, rule.reply_condition)
+        lines.append(
+            f"• `{rule.mode}` — `{truncate(rule.trigger, 50)}` → {truncate(rule.reply_text, 60)}"
+            f"  [{cond_label}]"
+        )
     await ctx.reply("\n".join(lines))
 
 

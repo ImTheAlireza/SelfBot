@@ -191,18 +191,14 @@ def _not_found_help(ctx: Context, exc: SupervisorNotFound) -> str:
 async def _supervisor_restart(ctx: Context) -> None:
     runner = _runner(ctx)
 
-    # Fail fast: locating the binary before asking for confirmation avoids
-    # prompting the user for a restart that cannot happen.
+    # Fail fast: locate the binary so we can report a clear error if it's missing.
     try:
         runner.resolve()
     except SupervisorNotFound as exc:
         await ctx.reply(_not_found_help(ctx, exc))
         return
 
-    if not await ctx.bot.confirm(ctx.event, "⚠️ Restart the bot?"):
-        await ctx.reply("👍 Cancelled.")
-        return
-
+    # Restart directly — no confirmation prompt.
     await ctx.reply(
         f"🔄 Restarting `{runner.process_name}`…\n"
         "I'll go offline for a few seconds."

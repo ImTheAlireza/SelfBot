@@ -432,13 +432,37 @@ class SelfBot:
             if not matched:
                 continue
 
+            # Check reply condition.
+            cond = getattr(rule, "reply_condition", "any") or "any"
+            if cond == "nr":
+                # Only reply if the message is NOT a reply.
+                if getattr(event.message, "reply_to", None) is not None:
+                    continue
+            elif cond == "sr":
+                # Only reply if the message is a reply to me.
+                reply_to = getattr(event.message, "reply_to", None)
+                if reply_to is None:
+                    continue
+                # Check if the replied-to message is from the bot's own account.
+                reply_to_msg_id = getattr(reply_to, "reply_to_msg_id", None)
+                if reply_to_msg_id is None:
+                    continue
+                try:
+                    replied_msg = await self.client.get_messages(event.chat_id, ids=reply_to_msg_id)
+                    if replied_msg is None or getattr(replied_msg, "sender_id", None) != self.me.id:
+                        continue
+                except Exception:
+                    logger.debug("Could not fetch replied-to message for -sr check", exc_info=True)
+                    continue
+
             try:
                 await event.reply(rule.reply_text)
                 logger.debug(
-                    "Auto-replied in chat %s using %s %r",
+                    "Auto-replied in chat %s using %s %r (condition=%s)",
                     event.chat_id,
                     rule.mode,
                     rule.trigger,
+                    cond,
                 )
                 return True
             except Exception as exc:
