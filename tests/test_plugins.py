@@ -65,11 +65,11 @@ async def test_self_off_then_on(bot, registry):
 
 
 @pytest.mark.asyncio
-async def test_self_restart_without_supervisor_is_graceful(bot, registry):
-    """No SUPERVISOR_PROCESS configured -> actionable hint, not a crash."""
+async def test_self_restart_without_supervisor_exits_gracefully(bot, registry):
+    """No supervisorctl available -> exit process, let container restart it."""
     event = FakeEvent(raw_text="self restart")
     await registry.dispatch(bot, event, "self restart")
-    assert any("SUPERVISOR_PROCESS" in r for r in event.replies)
+    assert any("Restarting" in r for r in event.replies)
 
 
 @pytest.mark.asyncio

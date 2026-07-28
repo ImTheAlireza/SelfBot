@@ -235,17 +235,16 @@ async def _sticker_api(ctx: Context, method: str, **fields: object) -> dict:
 @command(
     "stickerpack",
     category=CATEGORY,
-    usage="stickerpack <create|open|list|close|rename|delete> [name] [title|new_name]",
-    examples=("stickerpack create mypack My Pack", "stickerpack rename mypack newname", "stickerpack list"),
+    usage="stickerpack <create|open|list|close|delete> [name] [title]",
+    examples=("stickerpack create mypack My Pack", "stickerpack list"),
 )
 async def cmd_stickerpack(ctx: Context) -> None:
-    """Create, open, list, rename or delete your sticker packs."""
+    """Create, open, list or delete your sticker packs."""
     if not ctx.args:
         await ctx.reply(
             "📦 **Sticker packs**\n\n"
             "`stickerpack create <name> <title>` — start a new pack\n"
             "`stickerpack open <name>` — add to an existing pack\n"
-            "`stickerpack rename <name> <new_name>` — change pack username\n"
             "`stickerpack list` — show your packs\n"
             "`stickerpack close` — close the open pack\n"
             "`stickerpack delete <name>` — remove a pack\n\n"
@@ -259,7 +258,6 @@ async def cmd_stickerpack(ctx: Context) -> None:
         "open": _pack_open,
         "list": _pack_list,
         "close": _pack_close,
-        "rename": _pack_rename,
         "delete": _pack_delete,
     }
     handler = handlers.get(action)
@@ -325,78 +323,47 @@ async def _pack_close(ctx: Context) -> None:
     await ctx.reply(f"🔒 Closed **{pack['title']}**\n{link}", link_preview=False)
 
 
-async def _pack_rename(ctx: Context) -> None:
-    """Change a sticker pack's short name (its public username) via @Stickers.
+@command(
+    "setwatermark",
+    category=CATEGORY,
+    sudo_only=True,
+    usage="setwatermark <text>",
+    examples=("setwatermark @myname", "setwatermark", "setwatermark off"),
+)
+async def cmd_setwatermark(ctx: Context) -> None:
+    """Set the watermark text shown at the bottom of new stickers.
 
-    The @Stickers bot supports the /setshortname command to rename an existing
-    pack. This automates the conversation so the user doesn't have to do it
-    manually.
+    This changes the watermark used when creating stickers with `stick`.
+    Existing stickers are not affected — only new ones.
+
+    • `setwatermark @myname` — set watermark to `@myname`
+    • `setwatermark off` — disable watermark
+    • `setwatermark` — show current watermark
     """
-    if not ctx.config.sticker.enabled:
-        raise FeatureDisabledError(
-            "Sticker pack management needs a helper bot. Set "
-            "`STICKER_BOT_TOKEN` and `STICKER_BOT_USERNAME` in your .env."
-        )
-
-    if len(ctx.args) < 3:
-        raise UsageError("Usage: `stickerpack rename <current_name> <new_short_name>`")
-
-    current_name = ctx.args[1].lower()
-    new_short_name = ctx.args[2].lower()
-
-    if not new_short_name.replace("_", "").isalnum():
-        raise ValidationError(
-            "New name must be letters, numbers and underscores only."
-        )
-
-    pack = await ctx.db.get_sticker_pack(current_name)
-    if pack is None:
-        raise ValidationError(f"No pack named `{current_name}`.")
-
-    old_full = _full_pack_name(ctx, current_name)
-    new_full = f"{new_short_name}_by_{ctx.config.sticker.bot_username}"
-
-    status = await ctx.reply("📝 Asking @Stickers to rename…")
-
-    try:
-        async with ctx.client.conversation("Stickers", timeout=60) as conv:
-            await conv.send_message("/setshortname")
-            await conv.get_response()
-            await conv.send_message(old_full)
-            await conv.get_response()
-            await conv.send_message(new_full)
-            response = await conv.get_response()
-    except asyncio.TimeoutError:
-        await ctx.bot.edit(status, "❌ @Stickers did not respond in time.")
-        return
-    except Exception as exc:
-        await ctx.bot.edit(status, f"❌ Could not reach @Stickers: `{exc}`")
+    if not ctx.args:
+        current = ctx.config.sticker.watermark
+        if current:
+            await ctx.reply(f"📝 Current watermark: `{current}`")
+        else:
+            await ctx.reply("ℹ️ No watermark is set. Stickers have no text at the bottom.")
         return
 
-    text = response.text.lower()
-    if "error" in text or "invalid" in text or "already" in text:
-        await ctx.bot.edit(
-            status,
-            f"❌ @Stickers rejected the rename:\n`{response.text}`"
-        )
-        return
+    new_watermark = ctx.raw_args.strip()
+    if new_watermark.lower() == "off":
+        new_watermark = ""
 
-    # Update the local database to reflect the new name.
-    await ctx.db.delete_sticker_pack(current_name)
-    await ctx.db.add_sticker_pack(new_short_name, pack.title, pack.owner_id)
-
-    # Update any active session pointing at the old name.
-    for uid, session in ctx.bot.active_sticker_pack.items():
-        if session.get("name") == current_name:
-            session["name"] = new_short_name
-
-    link = f"https://t.me/addstickers/{new_full}"
-    await ctx.bot.edit(
-        status,
-        f"✅ Renamed `{old_full}` → `{new_full}`\n"
-        f"Link: {link}",
-        link_preview=False,
+    # Update the watermark in the live config. Since Config is frozen,
+    # we need to replace the sticker sub-config.
+    import dataclasses
+    ctx.bot.config = dataclasses.replace(
+        ctx.bot.config,
+        sticker=dataclasses.replace(ctx.bot.config.sticker, watermark=new_watermark),
     )
+
+    if new_watermark:
+        await ctx.reply(f"✅ Watermark set to `{new_watermark}`.\nNew stickers will show this at the bottom.")
+    else:
+        await ctx.reply("✅ Watermark disabled. New stickers will have no text at the bottom.")
 
 
 async def _pack_delete(ctx: Context) -> None:

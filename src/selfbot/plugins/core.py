@@ -28,6 +28,12 @@ logger = logging.getLogger(__name__)
 CATEGORY = "Core"
 
 
+def _graceful_exit(bot: object) -> None:
+    """Exit the process so the container manager restarts it."""
+    import os
+    os._exit(0)
+
+
 @command(
     "help",
     category=CATEGORY,
@@ -189,41 +195,57 @@ def _not_found_help(ctx: Context, exc: SupervisorNotFound) -> str:
 
 
 async def _supervisor_restart(ctx: Context) -> None:
-    runner = _runner(ctx)
+    """Restart the bot. If supervisorctl is available, use it; otherwise
+    just exit the process and let the container manager (Docker, systemd,
+    supervisord, etc.) restart it automatically.
+    """
+    supervisor = ctx.config.supervisor
 
-    # Fail fast: locate the binary so we can report a clear error if it's missing.
-    try:
-        runner.resolve()
-    except SupervisorNotFound as exc:
-        await ctx.reply(_not_found_help(ctx, exc))
-        return
-
-    # Restart directly — no confirmation prompt.
-    await ctx.reply(
-        f"🔄 Restarting `{runner.process_name}`…\n"
-        "I'll go offline for a few seconds."
-    )
-
-    try:
-        result = await runner.restart()
-    except asyncio.TimeoutError:
-        # Expected: supervisord kills this process mid-command on success.
-        logger.info("supervisorctl restart timed out (likely restarting now)")
-        return
-    except SupervisorNotFound as exc:
-        await ctx.reply(_not_found_help(ctx, exc))
-        return
-    except OSError as exc:
-        await ctx.reply(f"❌ Could not run supervisorctl: `{exc}`")
-        return
-
-    if not result.ok:
-        await ctx.reply(
-            f"❌ Restart failed (exit {result.returncode}):\n"
-            f"`{truncate(result.output or 'no output', 500)}`"
+    # If supervisorctl is configured and can be found, use it.
+    if supervisor.enabled and resolve_supervisorctl(supervisor.executable):
+        runner = SupervisorRunner(
+            process_name=supervisor.process_name,
+            config_path=supervisor.config_path,
+            executable=supervisor.executable,
         )
-    elif result.output:
-        logger.info("supervisorctl restart: %s", result.output)
+        try:
+            runner.resolve()
+        except SupervisorNotFound as exc:
+            await ctx.reply(_not_found_help(ctx, exc))
+            return
+
+        await ctx.reply(
+            f"🔄 Restarting `{runner.process_name}` via supervisorctl…\n"
+            "I'll go offline for a few seconds."
+        )
+
+        try:
+            result = await runner.restart()
+        except asyncio.TimeoutError:
+            logger.info("supervisorctl restart timed out (likely restarting now)")
+            return
+        except SupervisorNotFound as exc:
+            await ctx.reply(_not_found_help(ctx, exc))
+            return
+        except OSError as exc:
+            await ctx.reply(f"❌ Could not run supervisorctl: `{exc}`")
+            return
+
+        if not result.ok:
+            await ctx.reply(
+                f"❌ Restart failed (exit {result.returncode}):\n"
+                f"`{truncate(result.output or 'no output', 500)}`"
+            )
+        elif result.output:
+            logger.info("supervisorctl restart: %s", result.output)
+        return
+
+    # No supervisorctl — just exit. The process manager (Docker `restart:
+    # unless-stopped`, systemd, etc.) will bring us back up automatically.
+    await ctx.reply("🔄 Restarting — exiting process. The container will restart me.")
+    logger.info("Restart requested; exiting process for automatic respawn")
+    # Schedule the shutdown so the reply gets sent first.
+    asyncio.get_event_loop().call_later(1.0, _graceful_exit, ctx.bot)
 
 
 async def _supervisor_status(ctx: Context) -> None:

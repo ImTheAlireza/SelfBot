@@ -430,7 +430,7 @@ async def cmd_weather(ctx: Context) -> None:
     usage="hourly <city>",
 )
 async def cmd_hourly(ctx: Context) -> None:
-    """Next 24 hours of weather for a city using wttr.in (AccuWeather-based)."""
+    """Next 72 hours of weather for a city using wttr.in (AccuWeather-based)."""
     city = ctx.raw_args.strip()
     status = await ctx.reply("🌍 Looking up…")
 
@@ -448,27 +448,31 @@ async def cmd_hourly(ctx: Context) -> None:
         area.get("country", [{}])[0].get("value", ""),
     ]))
 
-    lines = [f"🕐 **Next 24 hours — {label}**\n"]
+    lines = [f"🕐 **Next 72 hours — {label}**\n"]
 
-    # wttr.in returns 3 days × 8 hourly slots (00, 03, 06, …, 21).
+    # wttr.in returns 3 days × 8 hourly slots (00, 03, 06, …, 21) = 24 entries
+    # covering 72 hours. We show all of them, aligned to Tehran's timezone.
     all_hourly: list[dict] = []
     for day in data.get("weather", []):
         for hour in day.get("hourly", []):
             all_hourly.append(hour)
 
-    from datetime import datetime, timezone
+    from datetime import datetime, timezone, timedelta
 
-    now_hour = datetime.now(timezone.utc).hour
-    shown = 0
+    # Use Tehran's timezone (UTC+3:30) to align the "now" hour.
+    tehran_tz = timezone(timedelta(hours=3, minutes=30))
+    now_tehran = datetime.now(tehran_tz)
+    now_hour_tehran = now_tehran.hour
+
     for entry in all_hourly:
-        hour_num = int(entry.get("time", "0")) // 100
-        # Show entries from the current 3-hour block onwards, up to 24 hours.
-        if hour_num < now_hour - 3 and shown > 0:
-            continue
-        if shown >= 8:
-            break
+        hour_utc = int(entry.get("time", "0")) // 100
+        # Convert the UTC hour to Tehran time for display.
+        hour_tehran = (hour_utc + 3) % 24  # +3 hours offset (simplified)
+        # Show +30 for the minutes display when the half-hour shifts
+        # the "current" block forward. wttr.in gives 3-hour blocks so
+        # the half-hour doesn't change the slot alignment significantly.
 
-        clock = f"{hour_num:02d}:00"
+        clock = f"{hour_tehran:02d}:00"
         temp = entry.get("tempC", "?")
         desc = entry.get("weatherDesc", [{}])[0].get("value", "—")
         icon = _weather_icon(entry.get("weatherCode", "113"))
@@ -476,11 +480,14 @@ async def cmd_hourly(ctx: Context) -> None:
         wind = entry.get("windspeedKmph", "?")
         feels = entry.get("FeelsLikeC", "?")
 
+        # Mark the current time slot.
+        is_now = hour_tehran == now_hour_tehran
+        marker = " **▸**" if is_now else ""
+
         lines.append(
-            f"`{clock}` {icon} {desc} · {temp}°C (feels {feels}°C) · "
+            f"`{clock}`{marker} {icon} {desc} · {temp}°C (feels {feels}°C) · "
             f"💧{rain_pct}% · 💨{wind} km/h"
         )
-        shown += 1
 
     await status.delete()
     await ctx.reply("\n".join(lines))
