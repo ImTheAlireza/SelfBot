@@ -20,7 +20,7 @@
 
 ## What it does
 
-43 commands across AI, file manipulation, timers, stickers, QR codes, weather,
+46 commands across AI, file manipulation, timers, stickers, QR codes, weather,
 dictionaries and chat automation — all driven from your own Telegram account by
 typing commands into any chat.
 
@@ -31,7 +31,7 @@ typing commands into any chat.
 | ⏰ **Timers** | Live-updating countdowns that survive restarts. |
 | 🎨 **Stickers** | Render text to stickers and manage packs via a helper bot. |
 | 🔲 **Utilities** | QR generate/decode, text→PDF (English + Persian), weather, dictionary with audio, IRR exchange rates. |
-| ⚡ **Automation** | Quick-reply shortcuts, per-channel auto-reactions, controlled bulk deletion. |
+| ⚡ **Automation** | Quick-reply shortcuts, per-channel auto-reactions, per-chat auto-replies, controlled bulk deletion. |
 
 ---
 
@@ -196,6 +196,8 @@ Durations: `90`, `15:30`, `1:15:30`, `2:12:15:30`, or `1h30m`.
 ### Automation & Stickers
 | Command | Description |
 |---|---|
+| `setautoreply <contain\|match> "input" "reply"` | 👑 Auto-reply in the current chat only (`contain` is whole-word aware) |
+| `remautoreply <contain\|match> "input"` / `autoreplylist` | 👑 Manage per-chat auto-replies |
 | `setreact <@channel> <emoji>` | 👑 Auto-react to new posts |
 | `remreact <@channel>` / `reactlist` | 👑 Manage auto-reactions |
 | `stick [-save] <text>` | Render text to a sticker |

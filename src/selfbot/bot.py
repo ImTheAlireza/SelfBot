@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import sys
 import time
 from collections.abc import Awaitable
@@ -76,6 +77,7 @@ class SelfBot:
         self.active_sticker_pack: dict[int, dict[str, Any]] = {}
         self.pending_confirmations: dict[tuple[int, int], asyncio.Future[bool]] = {}
 
+        self._auto_reply_cache: dict[int, list[Any]] = {}
         self._reaction_cache: dict[str, str] = {}
         self._reaction_cache_at = 0.0
         self._telegram_log_handler: TelegramLogHandler | None = None
@@ -350,14 +352,14 @@ class SelfBot:
         ):
             return
 
-        if not is_own and not await self.is_authorized(event):
-            return
+        handled = False
+        if is_own or await self.is_authorized(event):
+            # Always allow the owner to switch the bot back on.
+            if self.active or (is_own and self._is_reactivation(text)):
+                handled = await self.registry.dispatch(self, event, text)
 
-        # Always allow the owner to switch the bot back on.
-        if not self.active and not (is_own and self._is_reactivation(text)):
-            return
-
-        await self.registry.dispatch(self, event, text)
+        if not is_own and not handled:
+            await self._try_auto_reply(event, text)
 
     def _is_reactivation(self, text: str) -> bool:
         prefix = self.config.command_prefix
@@ -381,6 +383,75 @@ class SelfBot:
         except Exception as exc:
             logger.warning("Could not expand quick reply %r: %s", alias, exc)
             return False
+
+    async def _get_auto_replies(self, chat_id: int) -> list[Any]:
+        cached = self._auto_reply_cache.get(chat_id)
+        if cached is not None:
+            return cached
+
+        rules = await self.db.list_auto_replies(chat_id)
+        self._auto_reply_cache[chat_id] = rules
+        return rules
+
+    def _contains_isolated_phrase(self, text: str, trigger: str) -> bool:
+        """True when ``trigger`` appears as a standalone word/phrase.
+
+        `contain` should not fire for partial word matches like `سلام` inside
+        `سلامتی`. Python's ``\b`` is close, but we also treat ZWNJ/ZWJ as part
+        of a word so Persian compounds do not produce false positives.
+        """
+        trigger = trigger.strip()
+        if not trigger:
+            return False
+
+        pattern = re.compile(
+            rf"(?<![\w\u200c\u200d]){re.escape(trigger)}(?![\w\u200c\u200d])",
+            flags=re.IGNORECASE,
+        )
+        return pattern.search(text.strip()) is not None
+
+    async def _try_auto_reply(self, event: Any, text: str) -> bool:
+        try:
+            rules = await self._get_auto_replies(event.chat_id)
+        except Exception:
+            logger.debug("Could not load auto-replies for chat %s", event.chat_id, exc_info=True)
+            return False
+
+        if not rules:
+            return False
+
+        candidate = text.strip()
+        folded_candidate = candidate.casefold()
+        for rule in rules:
+            trigger = rule.trigger.strip()
+            matched = (
+                folded_candidate == trigger.casefold()
+                if rule.mode == "match"
+                else self._contains_isolated_phrase(candidate, trigger)
+            )
+            if not matched:
+                continue
+
+            try:
+                await event.reply(rule.reply_text)
+                logger.debug(
+                    "Auto-replied in chat %s using %s %r",
+                    event.chat_id,
+                    rule.mode,
+                    rule.trigger,
+                )
+                return True
+            except Exception as exc:
+                logger.warning(
+                    "Could not auto-reply in chat %s for %s %r: %s",
+                    event.chat_id,
+                    rule.mode,
+                    rule.trigger,
+                    exc,
+                )
+                return False
+
+        return False
 
     async def _maybe_react(self, event: Any) -> None:
         """Apply a configured auto-reaction to a channel post."""
@@ -414,6 +485,12 @@ class SelfBot:
             logger.warning("Rate limited while reacting; pausing %ss", exc.seconds)
         except Exception as exc:
             logger.debug("Reaction failed in @%s: %s", username, exc)
+
+    def invalidate_auto_reply_cache(self, chat_id: int | None = None) -> None:
+        if chat_id is None:
+            self._auto_reply_cache.clear()
+        else:
+            self._auto_reply_cache.pop(chat_id, None)
 
     def invalidate_reaction_cache(self) -> None:
         self._reaction_cache_at = 0.0
