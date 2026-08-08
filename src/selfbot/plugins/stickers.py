@@ -323,6 +323,49 @@ async def _pack_close(ctx: Context) -> None:
     await ctx.reply(f"🔒 Closed **{pack['title']}**\n{link}", link_preview=False)
 
 
+@command(
+    "setwatermark",
+    category=CATEGORY,
+    sudo_only=True,
+    usage="setwatermark <text>",
+    examples=("setwatermark @myname", "setwatermark", "setwatermark off"),
+)
+async def cmd_setwatermark(ctx: Context) -> None:
+    """Set the watermark text shown at the bottom of new stickers.
+
+    This changes the watermark used when creating stickers with `stick`.
+    Existing stickers are not affected — only new ones.
+
+    • `setwatermark @myname` — set watermark to `@myname`
+    • `setwatermark off` — disable watermark
+    • `setwatermark` — show current watermark
+    """
+    if not ctx.args:
+        current = ctx.config.sticker.watermark
+        if current:
+            await ctx.reply(f"📝 Current watermark: `{current}`")
+        else:
+            await ctx.reply("ℹ️ No watermark is set. Stickers have no text at the bottom.")
+        return
+
+    new_watermark = ctx.raw_args.strip()
+    if new_watermark.lower() == "off":
+        new_watermark = ""
+
+    # Update the watermark in the live config. Since Config is frozen,
+    # we need to replace the sticker sub-config.
+    import dataclasses
+    ctx.bot.config = dataclasses.replace(
+        ctx.bot.config,
+        sticker=dataclasses.replace(ctx.bot.config.sticker, watermark=new_watermark),
+    )
+
+    if new_watermark:
+        await ctx.reply(f"✅ Watermark set to `{new_watermark}`.\nNew stickers will show this at the bottom.")
+    else:
+        await ctx.reply("✅ Watermark disabled. New stickers will have no text at the bottom.")
+
+
 async def _pack_delete(ctx: Context) -> None:
     if len(ctx.args) < 2:
         raise UsageError("Usage: `stickerpack delete <name>`")

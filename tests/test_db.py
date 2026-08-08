@@ -66,18 +66,20 @@ async def test_quick_replies_are_per_user(db):
 @pytest.mark.asyncio
 async def test_auto_reply_crud(db):
     await db.set_auto_reply(-100, "contain", "hello", "hi there")
-
     rules = await db.list_auto_replies(-100)
     assert len(rules) == 1
     assert rules[0].chat_id == -100
     assert rules[0].mode == "contain"
     assert rules[0].trigger == "hello"
     assert rules[0].reply_text == "hi there"
+    assert rules[0].reply_condition == "any"
 
-    await db.set_auto_reply(-100, "contain", "hello", "updated")
+    # Update with a reply condition.
+    await db.set_auto_reply(-100, "contain", "hello", "updated", reply_condition="nr")
     rules = await db.list_auto_replies(-100)
     assert len(rules) == 1
     assert rules[0].reply_text == "updated"
+    assert rules[0].reply_condition == "nr"
 
     assert await db.delete_auto_reply(-100, "contain", "hello") == 1
     assert await db.list_auto_replies(-100) == []
@@ -94,6 +96,37 @@ async def test_auto_replies_are_per_chat(db):
     assert len(rules_two) == 1
     assert rules_one[0].reply_text == "pong one"
     assert rules_two[0].reply_text == "pong two"
+
+
+@pytest.mark.asyncio
+async def test_delete_all_auto_replies(db):
+    await db.set_auto_reply(-100, "contain", "hello", "hi")
+    await db.set_auto_reply(-200, "match", "ping", "pong")
+    await db.set_auto_reply(-300, "contain", "bye", "ciao")
+
+    all_rules = await db.list_all_auto_replies()
+    assert len(all_rules) == 3
+
+    count = await db.delete_all_auto_replies()
+    assert count == 3
+
+    assert await db.list_all_auto_replies() == []
+    assert await db.list_auto_replies(-100) == []
+
+
+@pytest.mark.asyncio
+async def test_auto_reply_condition_persists(db):
+    await db.set_auto_reply(-100, "contain", "hello", "hi", reply_condition="nr")
+    rules = await db.list_auto_replies(-100)
+    assert rules[0].reply_condition == "nr"
+
+    await db.set_auto_reply(-100, "contain", "hey", "ho", reply_condition="sr")
+    rules = await db.list_auto_replies(-100)
+    assert len(rules) == 2
+    nr_rule = [r for r in rules if r.trigger == "hello"][0]
+    sr_rule = [r for r in rules if r.trigger == "hey"][0]
+    assert nr_rule.reply_condition == "nr"
+    assert sr_rule.reply_condition == "sr"
 
 
 @pytest.mark.asyncio

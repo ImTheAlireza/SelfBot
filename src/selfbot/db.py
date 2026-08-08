@@ -117,6 +117,7 @@ class AutoReply:
     mode: str
     trigger: str
     reply_text: str
+    reply_condition: str = "any"  # "any" | "nr" | "sr"
     created_at: datetime | None = None
 
 
@@ -326,6 +327,7 @@ class Database:
                     mode TEXT NOT NULL,
                     trigger_text TEXT NOT NULL,
                     reply_text TEXT NOT NULL,
+                    reply_condition TEXT NOT NULL DEFAULT 'any',
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (chat_id, mode, trigger_text)
                 )
@@ -386,6 +388,7 @@ class Database:
                     mode VARCHAR(16) NOT NULL,
                     trigger_text VARCHAR(255) NOT NULL,
                     reply_text TEXT NOT NULL,
+                    reply_condition VARCHAR(8) NOT NULL DEFAULT 'any',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (chat_id, mode, trigger_text)
                 ) {charset}
@@ -417,6 +420,31 @@ class Database:
 
         for statement in statements:
             await self.execute(statement)
+
+        # Migrate existing tables that predate the reply_condition column.
+        if self._backend == "sqlite":
+            try:
+                cols = await self.fetch_all("PRAGMA table_info(auto_replies)")
+                col_names = {c["name"] for c in cols}
+                if "reply_condition" not in col_names:
+                    await self.execute(
+                        "ALTER TABLE auto_replies ADD COLUMN reply_condition TEXT NOT NULL DEFAULT 'any'"
+                    )
+            except Exception:
+                logger.debug("auto_replies migration check failed", exc_info=True)
+        else:
+            try:
+                row = await self.fetch_one(
+                    "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                    "WHERE TABLE_NAME = 'auto_replies' AND COLUMN_NAME = 'reply_condition'"
+                )
+                if not row:
+                    await self.execute(
+                        "ALTER TABLE auto_replies ADD COLUMN reply_condition "
+                        "VARCHAR(8) NOT NULL DEFAULT 'any'"
+                    )
+            except Exception:
+                logger.debug("auto_replies migration check failed", exc_info=True)
 
     # -- users -------------------------------------------------------------
 
@@ -507,7 +535,8 @@ class Database:
     # -- auto replies ------------------------------------------------------
 
     async def set_auto_reply(
-        self, chat_id: int, mode: str, trigger: str, reply_text: str
+        self, chat_id: int, mode: str, trigger: str, reply_text: str, *,
+        reply_condition: str = "any",
     ) -> None:
         exists = await self.fetch_one(
             "SELECT trigger_text FROM auto_replies "
@@ -516,15 +545,15 @@ class Database:
         )
         if exists:
             await self.execute(
-                "UPDATE auto_replies SET reply_text = %s "
+                "UPDATE auto_replies SET reply_text = %s, reply_condition = %s "
                 "WHERE chat_id = %s AND mode = %s AND trigger_text = %s",
-                (reply_text, chat_id, mode, trigger),
+                (reply_text, reply_condition, chat_id, mode, trigger),
             )
         else:
             await self.execute(
-                "INSERT INTO auto_replies (chat_id, mode, trigger_text, reply_text) "
-                "VALUES (%s, %s, %s, %s)",
-                (chat_id, mode, trigger, reply_text),
+                "INSERT INTO auto_replies (chat_id, mode, trigger_text, reply_text, reply_condition) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (chat_id, mode, trigger, reply_text, reply_condition),
             )
 
     async def delete_auto_reply(self, chat_id: int, mode: str, trigger: str) -> int:
@@ -533,9 +562,31 @@ class Database:
             (chat_id, mode, trigger),
         )
 
+    async def delete_all_auto_replies(self) -> int:
+        """Remove every auto-reply rule across all chats."""
+        return await self.execute("DELETE FROM auto_replies")
+
+    async def list_all_auto_replies(self) -> list[AutoReply]:
+        """Return every auto-reply rule across all chats."""
+        rows = await self.fetch_all(
+            "SELECT chat_id, mode, trigger_text, reply_text, reply_condition, created_at "
+            "FROM auto_replies ORDER BY chat_id, mode, trigger_text"
+        )
+        return [
+            AutoReply(
+                chat_id=int(row["chat_id"]),
+                mode=row["mode"],
+                trigger=row["trigger_text"],
+                reply_text=row["reply_text"],
+                reply_condition=row.get("reply_condition", "any"),
+                created_at=_as_aware(row.get("created_at")),
+            )
+            for row in rows
+        ]
+
     async def list_auto_replies(self, chat_id: int) -> list[AutoReply]:
         rows = await self.fetch_all(
-            "SELECT chat_id, mode, trigger_text, reply_text, created_at FROM auto_replies "
+            "SELECT chat_id, mode, trigger_text, reply_text, reply_condition, created_at FROM auto_replies "
             "WHERE chat_id = %s",
             (chat_id,),
         )
@@ -545,6 +596,7 @@ class Database:
                 mode=row["mode"],
                 trigger=row["trigger_text"],
                 reply_text=row["reply_text"],
+                reply_condition=row.get("reply_condition", "any"),
                 created_at=_as_aware(row.get("created_at")),
             )
             for row in rows

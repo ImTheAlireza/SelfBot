@@ -92,6 +92,13 @@ class FakeMessage:
 
 
 @dataclass
+class FakeReplyTo:
+    """Stands in for ``MessageReplyHeader``."""
+
+    reply_to_msg_id: int = 0
+
+
+@dataclass
 class FakeEvent:
     """Minimal stand-in for ``events.NewMessage.Event``."""
 
@@ -102,6 +109,7 @@ class FakeEvent:
     out: bool = True
     is_reply: bool = False
     reply_message: Any = None
+    reply_to: Any = None  # FakeReplyTo or None
     replies: list[str] = field(default_factory=list)
     responses: list[str] = field(default_factory=list)
     deleted: bool = False

@@ -65,11 +65,11 @@ async def test_self_off_then_on(bot, registry):
 
 
 @pytest.mark.asyncio
-async def test_self_restart_without_supervisor_is_graceful(bot, registry):
-    """No SUPERVISOR_PROCESS configured -> actionable hint, not a crash."""
+async def test_self_restart_without_supervisor_exits_gracefully(bot, registry):
+    """No supervisorctl available -> exit process, let container restart it."""
     event = FakeEvent(raw_text="self restart")
     await registry.dispatch(bot, event, "self restart")
-    assert any("SUPERVISOR_PROCESS" in r for r in event.replies)
+    assert any("Restarting" in r for r in event.replies)
 
 
 @pytest.mark.asyncio
@@ -166,11 +166,13 @@ async def test_setautoreply_list_and_remove(bot, registry, db):
     assert rules[0].mode == "contain"
     assert rules[0].trigger == "hello there"
     assert rules[0].reply_text == "General Kenobi"
+    assert rules[0].reply_condition == "any"
     assert bot.auto_reply_cache_invalidated == [-100]
 
     event = FakeEvent(raw_text="autoreplylist", chat_id=-100)
     await registry.dispatch(bot, event, event.raw_text)
     assert any("hello there" in r for r in event.replies)
+    assert any("any message" in r for r in event.replies)
 
     event = FakeEvent(
         raw_text='remautoreply contain "hello there"',
@@ -178,6 +180,46 @@ async def test_setautoreply_list_and_remove(bot, registry, db):
     )
     await registry.dispatch(bot, event, event.raw_text)
     assert await db.list_auto_replies(-100) == []
+
+
+@pytest.mark.asyncio
+async def test_setautoreply_with_nr_flag(bot, registry, db):
+    event = FakeEvent(
+        raw_text='setautoreply contain "hello" "hi" -nr',
+        chat_id=-100,
+    )
+    await registry.dispatch(bot, event, event.raw_text)
+
+    rules = await db.list_auto_replies(-100)
+    assert len(rules) == 1
+    assert rules[0].reply_condition == "nr"
+    assert any("non-reply only" in r for r in event.replies)
+
+
+@pytest.mark.asyncio
+async def test_setautoreply_with_sr_flag(bot, registry, db):
+    event = FakeEvent(
+        raw_text='setautoreply contain "hello" "hi" -sr',
+        chat_id=-100,
+    )
+    await registry.dispatch(bot, event, event.raw_text)
+
+    rules = await db.list_auto_replies(-100)
+    assert len(rules) == 1
+    assert rules[0].reply_condition == "sr"
+    assert any("reply-to-me only" in r for r in event.replies)
+
+
+@pytest.mark.asyncio
+async def test_remautoreply_allchats(bot, registry, db):
+    await db.set_auto_reply(-100, "contain", "hello", "hi")
+    await db.set_auto_reply(-200, "match", "ping", "pong")
+
+    event = FakeEvent(raw_text="remautoreply -allchats")
+    await registry.dispatch(bot, event, event.raw_text)
+    assert any("Removed" in r or "2" in r for r in event.replies)
+    assert await db.list_all_auto_replies() == []
+    assert None in bot.auto_reply_cache_invalidated
 
 
 @pytest.mark.asyncio
@@ -227,6 +269,68 @@ async def test_autoreply_contain_allows_punctuation_around_word(config, registry
     event = FakeEvent(raw_text="hello!", out=False, sender_id=999, chat_id=-100)
     assert await bot._try_auto_reply(event, event.raw_text)
     assert event.replies == ["hi"]
+
+
+@pytest.mark.asyncio
+async def test_autoreply_nr_skips_reply_messages(config, registry, db):
+    bot = SelfBot(config, registry=registry, client=FakeClient(), db=db)
+    await db.set_auto_reply(-100, "contain", "hello", "hi", reply_condition="nr")
+    bot.me = type("Me", (), {"id": SUDO_ID})()
+
+    # Non-reply message should trigger.
+    event = FakeEvent(raw_text="hello", out=False, sender_id=999, chat_id=-100, reply_to=None)
+    assert await bot._try_auto_reply(event, event.raw_text)
+    assert event.replies == ["hi"]
+
+    # Reply message should be skipped.
+    from conftest import FakeReplyTo
+    reply_event = FakeEvent(
+        raw_text="hello", out=False, sender_id=999, chat_id=-100,
+        reply_to=FakeReplyTo(reply_to_msg_id=42),
+    )
+    assert not await bot._try_auto_reply(reply_event, reply_event.raw_text)
+    assert reply_event.replies == []
+
+
+@pytest.mark.asyncio
+async def test_autoreply_sr_only_replies_to_me(config, registry, db):
+    bot = SelfBot(config, registry=registry, client=FakeClient(), db=db)
+    await db.set_auto_reply(-100, "contain", "hello", "hi", reply_condition="sr")
+    bot.me = type("Me", (), {"id": SUDO_ID})()
+
+    # Non-reply message should be skipped.
+    event = FakeEvent(raw_text="hello", out=False, sender_id=999, chat_id=-100, reply_to=None)
+    assert not await bot._try_auto_reply(event, event.raw_text)
+    assert event.replies == []
+
+    # Reply to someone else should be skipped.
+    from conftest import FakeReplyTo
+    other_reply_event = FakeEvent(
+        raw_text="hello", out=False, sender_id=999, chat_id=-100,
+        reply_to=FakeReplyTo(reply_to_msg_id=50),
+    )
+    # FakeClient.get_messages will fail; the bot catches it and skips.
+    assert not await bot._try_auto_reply(other_reply_event, other_reply_event.raw_text)
+
+
+@pytest.mark.asyncio
+async def test_autoreply_any_condition_replies_always(config, registry, db):
+    bot = SelfBot(config, registry=registry, client=FakeClient(), db=db)
+    await db.set_auto_reply(-100, "contain", "hello", "hi", reply_condition="any")
+    bot.me = type("Me", (), {"id": SUDO_ID})()
+
+    # Should reply regardless of reply_to status.
+    event = FakeEvent(raw_text="hello", out=False, sender_id=999, chat_id=-100, reply_to=None)
+    assert await bot._try_auto_reply(event, event.raw_text)
+    assert event.replies == ["hi"]
+
+    from conftest import FakeReplyTo
+    reply_event = FakeEvent(
+        raw_text="hello", out=False, sender_id=999, chat_id=-100,
+        reply_to=FakeReplyTo(reply_to_msg_id=42),
+    )
+    assert await bot._try_auto_reply(reply_event, reply_event.raw_text)
+    assert reply_event.replies == ["hi"]
 
 
 # ---------------------------------------------------------------------------
@@ -452,8 +556,8 @@ async def test_dic_rejects_non_words(bot, registry):
 
 
 def test_weather_icon_lookup():
-    assert _weather_icon(0) == "☀️"
-    assert _weather_icon(95) == "⛈"
+    assert _weather_icon("113") == "☀️"
+    assert _weather_icon("386") == "⛈"
     assert _weather_icon(9999) == "🌡"  # unknown code falls back
 
 
