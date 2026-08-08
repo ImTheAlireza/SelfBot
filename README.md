@@ -4,7 +4,7 @@
 
 **An asynchronous, plugin-based Telegram self-bot built on Telethon.**
 
-[![Tests](https://img.shields.io/badge/tests-222%20passing-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-passing-brightgreen)](tests/)
 [![Ruff](https://img.shields.io/badge/lint-ruff%20clean-brightgreen)](pyproject.toml)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
@@ -20,13 +20,12 @@
 
 ## What it does
 
-46 commands across AI, file manipulation, timers, stickers, QR codes, weather,
+41 commands for file manipulation, timers, stickers, QR codes, weather,
 dictionaries and chat automation — all driven from your own Telegram account by
 typing commands into any chat.
 
 | | |
 |---|---|
-| 🤖 **AI** | Chat, web-search and reasoning modes. Works with OpenAI, OpenRouter, AgentRouter, Anthropic, RapidAPI, or a local model (Ollama, LM Studio, vLLM). |
 | 📁 **Files** | Zip/unzip with AES passwords, batch queues, rename, audio tag editing, PDF page extraction. |
 | ⏰ **Timers** | Live-updating countdowns that survive restarts. |
 | 🎨 **Stickers** | Render text to stickers and manage packs via a helper bot. |
@@ -87,23 +86,9 @@ Everything is environment-driven; no secret ever goes in source. See
 | `DATABASE_URL` | | `sqlite+aiosqlite:///./data/selfbot.db` | SQLite or MySQL |
 | `COMMAND_PREFIX` | | *(none)* | Set to `.` to require `.help` |
 | `STARTUP_NOTIFY` | | `me` | Online message target: `me`, `off`, or a chat ID |
-| `AI_PROVIDER` | | `none` | `openai`, `openrouter`, `agentrouter`, `anthropic`, `rapidapi` |
-| `AI_API_KEY` | | — | Key for the chosen provider |
-| `AI_BASE_URL` | | — | Point at any OpenAI-compatible server |
 | `LOG_CHANNEL_ID` | | — | Mirror warnings/errors to a private channel |
 | `SUPERVISOR_PROCESS` | | `selfbot` | Enables `self status` / `self restart` |
 | `MAX_FILE_SIZE_MB` | | `512` | Ceiling on downloads and uploads |
-
-<details>
-<summary><b>Using a local model instead of a paid API</b></summary>
-
-```env
-AI_PROVIDER=openai
-AI_BASE_URL=http://localhost:11434/v1   # Ollama
-AI_API_KEY=ollama
-AI_MODEL=llama3.1
-```
-</details>
 
 <details>
 <summary><b>Using MySQL instead of SQLite</b></summary>
@@ -130,7 +115,7 @@ Commands are typed as plain messages from your own account. Set
 | `help [command]` | Command list, or detail for one command |
 | `ping` | Round-trip latency |
 | `whoami` | Your user ID, role and the current chat ID |
-| `status` | Uptime, provider and runtime counters |
+| `status` | Uptime and runtime counters |
 | `self on\|off\|restart\|status\|logs\|diag` | 👑 Process control and supervisor troubleshooting |
 
 ### Admin 👑
@@ -163,16 +148,6 @@ Commands are typed as plain messages from your own account. Set
 | `metadata <title> - <artist>` | Rewrite audio tags |
 | `split <start>-<end>` | Extract a PDF page range |
 
-### AI
-| Command | Description |
-|---|---|
-| `gpt <prompt>` | Ask the configured model |
-| `gpts <prompt>` | Ask with web search |
-| `gptr <prompt>` | Ask using the reasoning model |
-| `imagine <prompt>` | Generate an image |
-
-Reply to a message and send `gpt` with no prompt to use that message as input.
-
 ### Timers
 | Command | Description |
 |---|---|
@@ -191,7 +166,6 @@ Durations: `90`, `15:30`, `1:15:30`, `2:12:15:30`, or `1h30m`.
 | `weather <city>` / `hourly <city>` | Forecasts — no API key needed |
 | `dic <word>` | Definitions, examples and pronunciation audio |
 | `currency` | Live IRR rates, gold and coins |
-| `tts` | Read a replied message aloud |
 
 ### Automation & Stickers
 | Command | Description |
@@ -218,7 +192,7 @@ src/selfbot/
 ├── registry.py        Command registry, validation, dispatch
 ├── errors.py          Exception hierarchy
 ├── logging_setup.py   Console, rotating file and Telegram sinks
-├── services/ai.py     Pluggable AI providers
+├── services/          Supervisor integration
 ├── utils/             HTTP client, text helpers, filesystem safety
 └── plugins/           One module per feature area
 ```

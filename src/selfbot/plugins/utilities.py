@@ -1,13 +1,12 @@
-"""Utilities: QR codes, text-to-PDF, weather, dictionary, currency, TTS."""
+"""Utilities: QR codes, text-to-PDF, weather, dictionary and currency."""
 
 from __future__ import annotations
 
 import asyncio
-import base64
 import logging
 from pathlib import Path
 
-from ..errors import FeatureDisabledError, UsageError, ValidationError
+from ..errors import UsageError, ValidationError
 from ..registry import Context, command
 from ..utils.files import temp_workspace
 from ..utils.text import has_rtl, shape_rtl, truncate
@@ -640,58 +639,3 @@ def _scrape_tgju(html: str) -> dict[str, int]:
         except ValueError:
             continue
     return out
-
-
-# ---------------------------------------------------------------------------
-# Text to speech
-# ---------------------------------------------------------------------------
-
-
-@command("tts", category=CATEGORY, requires_reply=True, usage="tts")
-async def cmd_tts(ctx: Context) -> None:
-    """Read a replied-to message aloud as a voice note."""
-    if ctx.config.tts_provider == "none" or not ctx.config.rapidapi_key:
-        raise FeatureDisabledError(
-            "Text-to-speech is not configured. Set `TTS_PROVIDER=rapidapi` "
-            "and `RAPIDAPI_KEY` in your .env."
-        )
-
-    replied = await ctx.get_reply_message()
-    text = (replied.raw_text or "").strip()
-    if not text:
-        raise ValidationError("The replied message has no text.")
-    if len(text) > 5000:
-        raise ValidationError("Text is too long (max 5000 characters).")
-
-    status = await ctx.reply("🎙 Synthesising…")
-
-    data = await ctx.bot.http.post_json(
-        "https://joj-text-to-speech.p.rapidapi.com/",
-        json={
-            "input": {"text": text},
-            "voice": {
-                "languageCode": "en-US",
-                "name": "en-US-Journey-F",
-                "ssmlGender": "FEMALE",
-            },
-            "audioConfig": {"audioEncoding": "MP3", "pitch": 0, "speakingRate": 1.0},
-        },
-        headers={
-            "x-rapidapi-key": ctx.config.rapidapi_key,
-            "x-rapidapi-host": "joj-text-to-speech.p.rapidapi.com",
-            "Content-Type": "application/json",
-        },
-        timeout=60,
-    )
-
-    audio_b64 = (data or {}).get("audioContent")
-    if not audio_b64:
-        raise ValidationError("The TTS service returned no audio.")
-
-    with temp_workspace(parent=ctx.config.downloads_dir) as workspace:
-        path = workspace / "speech.mp3"
-        path.write_bytes(base64.b64decode(audio_b64))
-        await ctx.client.send_file(
-            ctx.chat_id, str(path), voice_note=True, reply_to=replied.id
-        )
-    await status.delete()

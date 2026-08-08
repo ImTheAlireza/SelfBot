@@ -471,40 +471,6 @@ async def test_split_rejects_malformed_argument(bot, registry):
 
 
 # ---------------------------------------------------------------------------
-# AI (disabled provider path)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_gpt_reports_disabled_provider(bot, registry, config):
-    from selfbot.services.ai import build_provider
-
-    bot.ai = build_provider(config.ai)
-    event = FakeEvent(raw_text="gpt hello there")
-    await registry.dispatch(bot, event, event.raw_text)
-    assert any("not configured" in r for r in event.replies)
-
-
-@pytest.mark.asyncio
-async def test_imagine_reports_disabled_provider(bot, registry, config):
-    from selfbot.services.ai import build_image_provider
-
-    bot.image_ai = build_image_provider(config.image)
-    event = FakeEvent(raw_text="imagine a cat")
-    await registry.dispatch(bot, event, event.raw_text)
-    assert any("not configured" in r for r in event.replies)
-
-
-@pytest.mark.asyncio
-async def test_tts_reports_disabled_provider(bot, registry):
-    replied = FakeMessage()
-    replied.raw_text = "read me"
-    event = FakeEvent(raw_text="tts", is_reply=True, reply_message=replied)
-    await registry.dispatch(bot, event, "tts")
-    assert any("not configured" in r for r in event.replies)
-
-
-# ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
 

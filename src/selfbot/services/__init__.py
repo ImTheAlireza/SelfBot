@@ -1,1 +1,1 @@
-"""External service integrations (AI providers and friends)."""
+"""External service integrations used by the bot."""

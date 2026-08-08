@@ -1,8 +1,8 @@
 """Shared async HTTP client.
 
 Replaces the blocking ``requests`` calls that ran directly inside async
-handlers. Every one of those froze the entire event loop — a 60 second GPT
-request made the bot deaf to all other messages for a full minute.
+handlers. Keeping network I/O in one async client prevents a slow upstream
+request from freezing the bot's event loop.
 
 A single :class:`aiohttp.ClientSession` is reused process-wide, with retries
 and exponential backoff for transient failures.
