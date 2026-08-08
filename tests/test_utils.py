@@ -193,7 +193,7 @@ def test_load_config_requires_credentials(monkeypatch, tmp_path):
 
 
 def test_load_config_reads_env_file(monkeypatch, tmp_path):
-    for key in ("TELEGRAM_API_ID", "TELEGRAM_API_HASH", "SUDO_USER_ID", "AI_PROVIDER"):
+    for key in ("TELEGRAM_API_ID", "TELEGRAM_API_HASH", "SUDO_USER_ID"):
         monkeypatch.delenv(key, raising=False)
 
     env = tmp_path / ".env"
@@ -202,8 +202,6 @@ def test_load_config_reads_env_file(monkeypatch, tmp_path):
         "TELEGRAM_API_ID=12345\n"
         'TELEGRAM_API_HASH="abcdef"\n'
         "export SUDO_USER_ID=999\n"
-        "AI_PROVIDER=openai\n"
-        "AI_API_KEY=sk-test\n"
         f"DATA_DIR={tmp_path}\n"
     )
 
@@ -211,17 +209,6 @@ def test_load_config_reads_env_file(monkeypatch, tmp_path):
     assert config.telegram.api_id == 12345
     assert config.telegram.api_hash == "abcdef"
     assert config.sudo_user_id == 999
-    assert config.ai.provider == "openai"
-    assert config.ai.enabled
-
-
-def test_config_rejects_bad_provider(monkeypatch, tmp_path):
-    monkeypatch.setenv("TELEGRAM_API_ID", "1")
-    monkeypatch.setenv("TELEGRAM_API_HASH", "h")
-    monkeypatch.setenv("SUDO_USER_ID", "1")
-    monkeypatch.setenv("AI_PROVIDER", "not-a-provider")
-    with pytest.raises(ConfigError, match="AI_PROVIDER"):
-        load_config(env_file=tmp_path / "none.env")
 
 
 def test_config_describe_hides_secrets(config):
@@ -233,13 +220,6 @@ def test_config_describe_hides_secrets(config):
     described = config.describe()
     assert "supersecret" not in described
     assert "***" in described
-
-
-def test_disabled_ai_reports_clearly(config):
-    from selfbot.services.ai import build_provider
-
-    provider = build_provider(config.ai)
-    assert provider.name == "none"
 
 
 # ---------------------------------------------------------------------------

@@ -9,28 +9,14 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
 
 from .errors import ConfigError
 
 __all__ = ["Config", "load_config"]
 
-_TRUTHY = {"1", "true", "yes", "on", "y"}
-
-AIProvider = Literal[
-    "openai", "openrouter", "agentrouter", "anthropic", "rapidapi", "none"
-]
-ImageProvider = Literal["openai", "agentrouter", "rapidapi", "none"]
-TTSProvider = Literal["rapidapi", "none"]
-
 
 def _env(key: str, default: str = "") -> str:
     return (os.getenv(key) or default).strip()
-
-
-def _env_bool(key: str, default: bool = False) -> bool:
-    raw = _env(key)
-    return raw.lower() in _TRUTHY if raw else default
 
 
 def _env_int(key: str, default: int | None = None) -> int | None:
@@ -53,15 +39,6 @@ def _env_float(key: str, default: float) -> float:
         raise ConfigError(f"{key} must be a number, got {raw!r}") from exc
 
 
-def _env_choice(key: str, allowed: set[str], default: str) -> str:
-    raw = _env(key, default).lower()
-    if raw not in allowed:
-        raise ConfigError(
-            f"{key} must be one of {sorted(allowed)}, got {raw!r}"
-        )
-    return raw
-
-
 @dataclass(frozen=True, slots=True)
 class TelegramConfig:
     api_id: int
@@ -77,32 +54,6 @@ class TelegramConfig:
             "phone": f"…{self.phone[-4:]}" if self.phone else "(interactive)",
             "session": self.session_name,
         }
-
-
-@dataclass(frozen=True, slots=True)
-class AIConfig:
-    provider: AIProvider
-    api_key: str
-    base_url: str
-    model: str
-    reasoning_model: str
-    max_tokens: int
-    timeout: int
-
-    @property
-    def enabled(self) -> bool:
-        return self.provider != "none" and bool(self.api_key or self.base_url)
-
-
-@dataclass(frozen=True, slots=True)
-class ImageConfig:
-    provider: ImageProvider
-    api_key: str
-    model: str
-
-    @property
-    def enabled(self) -> bool:
-        return self.provider != "none" and bool(self.api_key)
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,8 +91,6 @@ class SpamConfig:
 @dataclass(frozen=True, slots=True)
 class Config:
     telegram: TelegramConfig
-    ai: AIConfig
-    image: ImageConfig
     sticker: StickerConfig
     supervisor: SupervisorConfig
     spam: SpamConfig
@@ -155,8 +104,6 @@ class Config:
     command_prefix: str
     quick_reply_prefix: str
     startup_notify: str
-    rapidapi_key: str
-    tts_provider: TTSProvider
     max_file_size_mb: int
     temp_ttl_minutes: int
 
@@ -187,11 +134,6 @@ class Config:
             f"database     : {_redact_url(self.database_url)}",
             f"sudo user    : {self.sudo_user_id}",
             f"prefix       : {self.command_prefix or '(none)'}",
-            f"ai provider  : {self.ai.provider}"
-            + (f" ({self.ai.model})" if self.ai.enabled else " [disabled]"),
-            f"image gen    : {self.image.provider}"
-            + ("" if self.image.enabled else " [disabled]"),
-            f"tts          : {self.tts_provider}",
             f"stickers     : {'enabled' if self.sticker.enabled else 'disabled'}",
             f"supervisor   : {'enabled' if self.supervisor.enabled else 'disabled'}",
             f"log channel  : {self.log_channel_id or '(none)'}",
@@ -260,31 +202,6 @@ def load_config(
         "DATABASE_URL", f"sqlite+aiosqlite:///{data_dir / 'selfbot.db'}"
     )
 
-    ai_provider = _env_choice(
-        "AI_PROVIDER",
-        {"openai", "openrouter", "agentrouter", "anthropic", "rapidapi", "none"},
-        "none",
-    )
-    ai_model = _env("AI_MODEL", "gpt-4o-mini")
-    ai = AIConfig(
-        provider=ai_provider,  # type: ignore[arg-type]
-        api_key=_env("AI_API_KEY") or _env("RAPIDAPI_KEY"),
-        base_url=_env("AI_BASE_URL"),
-        model=ai_model,
-        reasoning_model=_env("AI_REASONING_MODEL") or ai_model,
-        max_tokens=_env_int("AI_MAX_TOKENS", 2048) or 2048,
-        timeout=_env_int("AI_TIMEOUT", 120) or 120,
-    )
-
-    image_provider = _env_choice(
-        "IMAGE_PROVIDER", {"openai", "agentrouter", "rapidapi", "none"}, "none"
-    )
-    image = ImageConfig(
-        provider=image_provider,  # type: ignore[arg-type]
-        api_key=_env("IMAGE_API_KEY") or _env("AI_API_KEY") or _env("RAPIDAPI_KEY"),
-        model=_env("IMAGE_MODEL", "gpt-image-1"),
-    )
-
     sticker = StickerConfig(
         bot_token=_env("STICKER_BOT_TOKEN"),
         bot_username=_env("STICKER_BOT_USERNAME").lstrip("@"),
@@ -311,8 +228,6 @@ def load_config(
             phone=_env("TELEGRAM_PHONE"),
             session_name=_env("TELEGRAM_SESSION", "selfbot"),
         ),
-        ai=ai,
-        image=image,
         sticker=sticker,
         supervisor=supervisor,
         spam=spam,
@@ -325,8 +240,6 @@ def load_config(
         command_prefix=_env("COMMAND_PREFIX"),
         quick_reply_prefix=_env("QUICK_REPLY_PREFIX", "-") or "-",
         startup_notify=_env("STARTUP_NOTIFY", "me") or "me",
-        rapidapi_key=_env("RAPIDAPI_KEY"),
-        tts_provider=_env_choice("TTS_PROVIDER", {"rapidapi", "none"}, "none"),  # type: ignore[arg-type]
         max_file_size_mb=_env_int("MAX_FILE_SIZE_MB", 512) or 512,
         temp_ttl_minutes=_env_int("TEMP_TTL_MINUTES", 60) or 60,
     )

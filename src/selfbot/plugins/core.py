@@ -97,7 +97,6 @@ async def cmd_status(ctx: Context) -> None:
         f"Uptime: `{format_duration(bot.uptime)}`\n"
         f"Commands: `{len(bot.registry)}`\n"
         f"Database: `{bot.db.backend}`\n"
-        f"AI: `{bot.ai.name}`  •  Images: `{bot.image_ai.name}`\n"
         f"Active timers: `{active_timers}`\n"
         f"Queued files: `{queued}`\n"
         f"Python: `{platform.python_version()}` on `{platform.system()}`\n"

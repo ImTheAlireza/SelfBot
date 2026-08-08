@@ -104,15 +104,12 @@ python -m selfbot --check
 Expected:
 
 ```
-✅ Configuration valid — 43 commands registered.
+✅ Configuration valid — 41 commands registered.
 
 session      : ./data/selfbot
 database     : sqlite+aiosqlite:///./data/selfbot.db
 sudo user    : 1038991065
-ai provider  : none [disabled]
 ```
-
-`ai provider: none` is correct for now — step 8 turns it on.
 
 ### Step 7 — Start it
 
@@ -135,80 +132,7 @@ watch a live countdown. Stop the bot with `Ctrl-C`.
 
 ## Part 3 — Optional extras
 
-### Step 8 — Turn on AI (`gpt`, `gpts`, `gptr`, `imagine`)
-
-Pick one and add it to `.env`:
-
-<details open>
-<summary><b>OpenAI</b></summary>
-
-```env
-AI_PROVIDER=openai
-AI_API_KEY=sk-...
-AI_MODEL=gpt-4o-mini
-IMAGE_PROVIDER=openai
-IMAGE_API_KEY=sk-...
-```
-</details>
-
-<details open>
-<summary><b>AgentRouter</b> — one key, many models</summary>
-
-```env
-AI_PROVIDER=agentrouter
-AI_API_KEY=sk-your-agentrouter-key
-AI_MODEL=claude-sonnet-4-5-20250929
-AI_REASONING_MODEL=gpt-4o
-
-# Optional: image generation through the same key
-IMAGE_PROVIDER=agentrouter
-IMAGE_API_KEY=sk-your-agentrouter-key
-IMAGE_MODEL=dall-e-3
-```
-
-Keys come from [agentrouter.org/console/token](https://agentrouter.org/console/token).
-Use whatever model slug AgentRouter lists — it's a passthrough router, so the
-slug is sent through untouched. `AI_MODEL` powers `gpt`/`gpts`;
-`AI_REASONING_MODEL` powers `gptr`.
-</details>
-
-<details>
-<summary><b>OpenRouter</b> — many models behind one key, has web search</summary>
-
-```env
-AI_PROVIDER=openrouter
-AI_API_KEY=sk-or-...
-AI_MODEL=anthropic/claude-3.5-sonnet
-```
-</details>
-
-<details>
-<summary><b>Local model</b> — free, private, no API key</summary>
-
-With [Ollama](https://ollama.com) running (`ollama pull llama3.1`):
-
-```env
-AI_PROVIDER=openai
-AI_BASE_URL=http://localhost:11434/v1
-AI_API_KEY=ollama
-AI_MODEL=llama3.1
-```
-</details>
-
-<details>
-<summary><b>Your regenerated RapidAPI key</b> — reuses the v1 endpoints</summary>
-
-```env
-AI_PROVIDER=rapidapi
-RAPIDAPI_KEY=your_new_key_from_step_1
-TTS_PROVIDER=rapidapi
-```
-Also enables `tts`, and `annas`-style book search if you re-add it.
-</details>
-
-Restart the bot, then send `gpt hello` to test.
-
-### Step 9 — Persian text in PDFs and stickers
+### Step 8 — Persian text in PDFs and stickers
 
 Without this, `topdf fa` and Persian `stick` text render as boxes:
 
@@ -377,10 +301,9 @@ Or open it at
 | `Missing required configuration: SUDO_USER_ID` | Run `python -m selfbot --login` (step 5). |
 | `Login failed: ApiIdInvalidError` | `TELEGRAM_API_ID`/`TELEGRAM_API_HASH` don't match. Recheck my.telegram.org. |
 | Commands do nothing | Send them from the **same account** the bot logged in as — Saved Messages is easiest. Check the bot isn't paused (`self on`). |
-| `AI is not configured` | Step 8. |
 | `supervisorctl could not be located` | Send `self diag`, then set `SUPERVISOR_CTL` or `pip install supervisor` in the venv. |
 | `supervisord has no program named X` | `SUPERVISOR_PROCESS` must match `[program:NAME]`. Check with `supervisorctl status`. |
-| Persian shows as boxes | Step 9. |
+| Persian shows as boxes | Step 8. |
 | `database is locked` | Two instances are running. `pkill -f "python -m selfbot"` and start one. |
 | Need to re-login | Delete `data/*.session` and run `--login` again. |
 | Want a command prefix | Set `COMMAND_PREFIX=.` in `.env`, then use `.help`. |
@@ -395,7 +318,7 @@ Run `python -m selfbot --log-level DEBUG` for verbose output.
 help              full command list
 help settimer     details for one command
 whoami            your ID, role, current chat ID
-status            uptime, providers, active timers
+status            uptime, configuration, active timers
 self off / self on   pause and resume
 ```
 

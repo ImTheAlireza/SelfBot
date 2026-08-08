@@ -10,9 +10,7 @@ from typing import Any
 import pytest
 
 from selfbot.config import (
-    AIConfig,
     Config,
-    ImageConfig,
     SpamConfig,
     StickerConfig,
     SupervisorConfig,
@@ -31,11 +29,6 @@ def config(tmp_path: Path) -> Config:
         telegram=TelegramConfig(
             api_id=1, api_hash="hash", phone="", session_name="test"
         ),
-        ai=AIConfig(
-            provider="none", api_key="", base_url="", model="m",
-            reasoning_model="m", max_tokens=100, timeout=10,
-        ),
-        image=ImageConfig(provider="none", api_key="", model="m"),
         sticker=StickerConfig(bot_token="", bot_username="", watermark=""),
         supervisor=SupervisorConfig(
             config_path="", process_name="", log_file="", executable=""
@@ -50,8 +43,6 @@ def config(tmp_path: Path) -> Config:
         command_prefix="",
         quick_reply_prefix="-",
         startup_notify="off",
-        rapidapi_key="",
-        tts_provider="none",
         max_file_size_mb=8,
         temp_ttl_minutes=60,
     )
@@ -183,8 +174,6 @@ class FakeBot:
         self.pending_confirmations: dict[Any, Any] = {}
         self.confirm_result = True
         self.confirm_prompts: list[str] = []
-        self.ai = _NamedStub("none")
-        self.image_ai = _NamedStub("none")
         self.http = None
         self._auto_reply_cache: dict[int, list[Any]] = {}
         self.auto_reply_cache_invalidated: list[int | None] = []
@@ -217,11 +206,6 @@ class FakeBot:
 
     def invalidate_reaction_cache(self) -> None:
         self.reaction_cache_invalidated = True
-
-
-class _NamedStub:
-    def __init__(self, name: str) -> None:
-        self.name = name
 
 
 @pytest.fixture

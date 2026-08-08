@@ -17,15 +17,15 @@ from selfbot.utils.files import safe_extract, sanitize_filename
 from selfbot.utils.text import chunk_text
 
 # ---------------------------------------------------------------------------
-# BUG 1 — nine commands raised TypeError when given arguments.
+# BUG 1 — several commands raised TypeError when given arguments.
 #
-# The old dispatcher always called `handler(event, *args)`, but `handle_tts`,
+# The old dispatcher always called `handler(event, *args)`, but
 # `handle_user_help`, `handle_currency`, `handle_backup`, `handle_db_import`,
 # `handle_ziplist_command` and `handle_qr_read_api` were `def f(event)`, while
 # `handle_del` and `handle_book_download_by_md5` took exactly one argument.
 # ---------------------------------------------------------------------------
 
-ZERO_ARG_COMMANDS = ["help", "currency", "tts", "add", "qrread", "status", "ping"]
+ZERO_ARG_COMMANDS = ["help", "currency", "add", "qrread", "status", "ping"]
 
 
 @pytest.mark.parametrize("name", ZERO_ARG_COMMANDS)

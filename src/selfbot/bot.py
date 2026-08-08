@@ -26,7 +26,6 @@ from .errors import ConfigError
 from .logging_setup import TelegramLogHandler
 from .registry import CommandRegistry
 from .registry import registry as global_registry
-from .services.ai import build_image_provider, build_provider
 from .utils.files import cleanup_old_files
 from .utils.http import close_client, get_client
 from .utils.text import TELEGRAM_LIMIT, chunk_text
@@ -39,7 +38,7 @@ _REACTION_CACHE_TTL = 300.0
 
 
 class SelfBot:
-    """Wires together the client, database, providers and command dispatch."""
+    """Wires together the client, database and command dispatch."""
 
     def __init__(
         self,
@@ -63,9 +62,6 @@ class SelfBot:
             system_version="1.0",
             app_version="2.0",
         )
-
-        self.ai = build_provider(config.ai)
-        self.image_ai = build_image_provider(config.image)
 
         # Mutable runtime state, previously scattered across module globals.
         self.active = True
@@ -165,7 +161,6 @@ class SelfBot:
             "",
             f"👤 {self._describe_account()}",
             f"⚡ {len(self.registry)} commands · 🗄 {self.db.backend}",
-            f"🧠 AI: {self.ai.name} · 🎨 images: {self.image_ai.name}",
         ]
 
         if timers_restored or timers_expired:
@@ -353,10 +348,11 @@ class SelfBot:
             return
 
         handled = False
-        if is_own or await self.is_authorized(event):
-            # Always allow the owner to switch the bot back on.
-            if self.active or (is_own and self._is_reactivation(text)):
-                handled = await self.registry.dispatch(self, event, text)
+        # Always allow the owner to switch the bot back on.
+        if (is_own or await self.is_authorized(event)) and (
+            self.active or (is_own and self._is_reactivation(text))
+        ):
+            handled = await self.registry.dispatch(self, event, text)
 
         if not is_own and not handled:
             await self._try_auto_reply(event, text)
