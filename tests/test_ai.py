@@ -56,6 +56,7 @@ async def test_gpt_sends_prompt_to_rapidapi(bot, registry):
         "x-rapidapi-host": RAPIDAPI_HOST,
         "Content-Type": "application/json",
     }
+    assert RAPIDAPI_MODEL == "GPT_5_4_high"
     assert kwargs["json"] == {
         "model": RAPIDAPI_MODEL,
         "temperature": 1,

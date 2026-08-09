@@ -143,8 +143,8 @@ curl -Lo assets/fonts/Vazirmatn-Regular.ttf \
 
 ### Step 9 — Use the `gpt` command
 
-The command is preconfigured to call `gemini_3_pro_high` through ChatGPT API8
-on RapidAPI. It does not require any `.env` settings. Start the bot and try:
+The command is preconfigured to call `GPT_5_4_high` through ChatGPT API8 on
+RapidAPI. It does not require any `.env` settings. Start the bot and try:
 
 ```text
 gpt What is the meaning of life?

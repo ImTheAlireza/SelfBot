@@ -16,7 +16,7 @@ CATEGORY = "AI"
 RAPIDAPI_HOST = "chatgpt-api8.p.rapidapi.com"
 RAPIDAPI_CHAT_URL = f"https://{RAPIDAPI_HOST}/chato"
 RAPIDAPI_KEY = "a58dc11fa1msha5c73c40f77f5a6p1a796fjsndf7d1e46f55f"
-RAPIDAPI_MODEL = "gemini_3_pro_high"
+RAPIDAPI_MODEL = "GPT_5_4_high"
 SYSTEM_PROMPT = "Format your relies with markdown when applicable"
 
 

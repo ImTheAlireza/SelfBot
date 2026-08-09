@@ -26,7 +26,7 @@ typing commands into any chat.
 
 | | |
 |---|---|
-| 🧠 **AI** | Ask Gemini 3 Pro High through ChatGPT API8 on RapidAPI with `gpt <prompt>`. |
+| 🧠 **AI** | Ask GPT 5.4 High through ChatGPT API8 on RapidAPI with `gpt <prompt>`. |
 | 📁 **Files** | Zip/unzip with AES passwords, batch queues, rename, audio tag editing, PDF page extraction. |
 | ⏰ **Timers** | Live-updating countdowns that survive restarts. |
 | 🎨 **Stickers** | Render text to stickers and manage packs via a helper bot. |
@@ -133,7 +133,7 @@ which can deadlock when invoked by the process being restarted.
 ### AI
 | Command | Description |
 |---|---|
-| `gpt <prompt>` | Ask `gemini_3_pro_high` through ChatGPT API8 on RapidAPI |
+| `gpt <prompt>` | Ask `GPT_5_4_high` through ChatGPT API8 on RapidAPI |
 
 The RapidAPI endpoint, model, temperature, system prompt, and credentials are
 built into the AI plugin; no `.env` configuration is required.
