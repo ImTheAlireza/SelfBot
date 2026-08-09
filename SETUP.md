@@ -141,20 +141,14 @@ curl -Lo assets/fonts/Vazirmatn-Regular.ttf \
   https://github.com/rastikerdar/vazirmatn/raw/master/fonts/ttf/Vazirmatn-Regular.ttf
 ```
 
-### Step 9 — Enable the `gpt` command
+### Step 9 — Use the `gpt` command
 
-Create an API key at [OpenRouter](https://openrouter.ai/settings/keys), then add
-it to `.env`:
+The command is preconfigured to call `gemini_3_pro_high` through ChatGPT API8
+on RapidAPI. It does not require any `.env` settings. Start the bot and try:
 
-```env
-OPENROUTER_API_KEY=your_openrouter_key
-OPENROUTER_MODEL=~openai/gpt-latest
+```text
+gpt What is the meaning of life?
 ```
-
-Restart the bot and try `gpt What is the meaning of life?`. The model setting is
-optional; the default alias always targets OpenAI's latest flagship GPT model.
-You can replace it with any model slug listed at
-[openrouter.ai/models](https://openrouter.ai/models).
 
 ### Step 10 — Enable CI on GitHub
 

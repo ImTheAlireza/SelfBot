@@ -1,19 +1,21 @@
-"""Tests for the OpenRouter-backed GPT command."""
+"""Tests for the RapidAPI-backed GPT command."""
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Any
 
 import pytest
 
 from conftest import FakeEvent
-from selfbot.config import OpenRouterConfig
 from selfbot.errors import ProviderError
 from selfbot.plugins.ai import (
-    OPENROUTER_CHAT_URL,
+    RAPIDAPI_CHAT_URL,
+    RAPIDAPI_HOST,
+    RAPIDAPI_KEY,
+    RAPIDAPI_MODEL,
+    SYSTEM_PROMPT,
     _extract_answer,
-    _format_openrouter_error,
+    _format_rapidapi_error,
 )
 
 
@@ -37,15 +39,10 @@ class StubHttp:
 
 
 @pytest.mark.asyncio
-async def test_gpt_sends_prompt_to_openrouter(bot, registry, config):
-    bot.config = replace(
-        config,
-        openrouter=OpenRouterConfig(
-            api_key="test-openrouter-key",
-            model="~openai/gpt-latest",
-        ),
+async def test_gpt_sends_prompt_to_rapidapi(bot, registry):
+    bot.http = StubHttp(
+        {"choices": [{"message": {"role": "assistant", "content": "Forty-two."}}]}
     )
-    bot.http = StubHttp({"choices": [{"message": {"role": "assistant", "content": "Forty-two."}}]})
     event = FakeEvent(raw_text="gpt What is the meaning of life?")
 
     assert await registry.dispatch(bot, event, event.raw_text)
@@ -53,46 +50,34 @@ async def test_gpt_sends_prompt_to_openrouter(bot, registry, config):
     assert event.replies == ["🤖 Thinking…", "Forty-two."]
     method, url, kwargs = bot.http.calls[0]
     assert method == "POST"
-    assert url == OPENROUTER_CHAT_URL
-    assert kwargs["headers"]["Authorization"] == "Bearer test-openrouter-key"
-    assert kwargs["headers"]["X-OpenRouter-Title"] == "SelfBot"
+    assert url == RAPIDAPI_CHAT_URL
+    assert kwargs["headers"] == {
+        "x-rapidapi-key": RAPIDAPI_KEY,
+        "x-rapidapi-host": RAPIDAPI_HOST,
+        "Content-Type": "application/json",
+    }
     assert kwargs["json"] == {
-        "model": "~openai/gpt-latest",
-        "messages": [{"role": "user", "content": "What is the meaning of life?"}],
-        "stream": False,
+        "model": RAPIDAPI_MODEL,
+        "temperature": 1,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": "What is the meaning of life?"},
+        ],
     }
     assert kwargs["timeout"] == 120
     assert kwargs["retries"] == 0
 
 
 @pytest.mark.asyncio
-async def test_gpt_uses_configured_model(bot, registry, config):
-    bot.config = replace(
-        config,
-        openrouter=OpenRouterConfig(
-            api_key="key",
-            model="openai/gpt-5-mini",
-        ),
-    )
-    bot.http = StubHttp({"choices": [{"message": {"content": "Hi"}}]})
+async def test_gpt_preserves_prompt_spacing_without_environment_config(bot, registry):
+    bot.http = StubHttp({"response": "Hi"})
     event = FakeEvent(raw_text="gpt   Keep   these spaces")
 
     await registry.dispatch(bot, event, event.raw_text)
 
     request = bot.http.calls[0][2]["json"]
-    assert request["model"] == "openai/gpt-5-mini"
-    assert request["messages"][0]["content"] == "Keep   these spaces"
-
-
-@pytest.mark.asyncio
-async def test_gpt_explains_how_to_enable_openrouter(bot, registry):
-    event = FakeEvent(raw_text="gpt hello")
-
-    await registry.dispatch(bot, event, event.raw_text)
-
-    assert len(event.replies) == 1
-    assert "OPENROUTER_API_KEY" in event.replies[0]
-    assert "restart" in event.replies[0]
+    assert request["messages"][-1]["content"] == "Keep   these spaces"
+    assert event.replies[-1] == "Hi"
 
 
 @pytest.mark.asyncio
@@ -105,38 +90,30 @@ async def test_gpt_requires_a_prompt(bot, registry):
 
 
 @pytest.mark.asyncio
-async def test_gpt_surfaces_openrouter_credit_error(bot, registry, config):
-    bot.config = replace(
-        config,
-        openrouter=OpenRouterConfig(api_key="key"),
-    )
+async def test_gpt_surfaces_rapidapi_quota_error(bot, registry):
     bot.http = StubHttp(
-        {"error": {"code": 402, "message": "Insufficient credits"}},
-        status=402,
+        {"message": "You have exceeded the rate limit"},
+        status=429,
     )
     event = FakeEvent(raw_text="gpt hello")
 
     await registry.dispatch(bot, event, event.raw_text)
 
     assert event.replies[0] == "🤖 Thinking…"
-    assert "insufficient credits" in event.replies[-1].lower()
+    assert "quota or rate limit" in event.replies[-1].lower()
 
 
 @pytest.mark.asyncio
-async def test_gpt_handles_error_embedded_in_http_200(bot, registry, config):
-    bot.config = replace(
-        config,
-        openrouter=OpenRouterConfig(api_key="key"),
-    )
+async def test_gpt_handles_error_embedded_in_http_200(bot, registry):
     bot.http = StubHttp(
-        {"error": {"code": 503, "message": "No available providers"}},
+        {"error": {"message": "Upstream model failed"}},
         status=200,
     )
     event = FakeEvent(raw_text="gpt hello")
 
     await registry.dispatch(bot, event, event.raw_text)
 
-    assert "no available provider" in event.replies[-1].lower()
+    assert "upstream model failed" in event.replies[-1].lower()
 
 
 def test_extract_answer_supports_text_content_parts():
@@ -156,6 +133,19 @@ def test_extract_answer_supports_text_content_parts():
 
 
 @pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({"response": "Response text"}, "Response text"),
+        ({"answer": "Answer text"}, "Answer text"),
+        ({"data": {"content": "Nested text"}}, "Nested text"),
+        ("Plain text", "Plain text"),
+    ],
+)
+def test_extract_answer_supports_common_rapidapi_shapes(payload, expected):
+    assert _extract_answer(payload) == expected
+
+
+@pytest.mark.parametrize(
     "payload",
     [None, {}, {"choices": []}, {"choices": [{}]}, {"choices": [{"message": {}}]}],
 )
@@ -164,9 +154,9 @@ def test_extract_answer_rejects_malformed_or_empty_responses(payload):
         _extract_answer(payload)
 
 
-def test_openrouter_errors_are_truncated():
-    message = _format_openrouter_error(
-        {"error": {"code": 400, "message": "x" * 1000}},
+def test_rapidapi_errors_are_truncated():
+    message = _format_rapidapi_error(
+        {"error": {"message": "x" * 1000}},
         400,
     )
     assert len(message) < 400

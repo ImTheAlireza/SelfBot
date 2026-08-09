@@ -1,4 +1,4 @@
-"""AI commands backed by OpenRouter."""
+"""AI commands backed by the ChatGPT API8 service on RapidAPI."""
 
 from __future__ import annotations
 
@@ -6,15 +6,18 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
-from ..errors import FeatureDisabledError, ProviderError, UsageError
+from ..errors import ProviderError, UsageError
 from ..registry import Context, command
 from ..utils.text import truncate
 
 logger = logging.getLogger(__name__)
 
 CATEGORY = "AI"
-OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
-OPENROUTER_REFERER = "https://github.com/ImTheAlireza/SelfBot"
+RAPIDAPI_HOST = "chatgpt-api8.p.rapidapi.com"
+RAPIDAPI_CHAT_URL = f"https://{RAPIDAPI_HOST}/chato"
+RAPIDAPI_KEY = "a58dc11fa1msha5c73c40f77f5a6p1a796fjsndf7d1e46f55f"
+RAPIDAPI_MODEL = "gemini_3_pro_high"
+SYSTEM_PROMPT = "Format your relies with markdown when applicable"
 
 
 @command(
@@ -25,56 +28,40 @@ OPENROUTER_REFERER = "https://github.com/ImTheAlireza/SelfBot"
     examples=("gpt What is the meaning of life?",),
 )
 async def cmd_gpt(ctx: Context) -> None:
-    """Ask a GPT model a question through OpenRouter."""
-    settings = ctx.config.openrouter
-    if not settings.enabled:
-        raise FeatureDisabledError("Set `OPENROUTER_API_KEY` in your `.env`, then restart the bot.")
-
+    """Ask the configured Gemini model through RapidAPI."""
     prompt = ctx.raw_args.strip()
     if not prompt:
         raise UsageError(f"Usage: `{ctx.config.command_prefix}gpt <prompt>`")
 
     status = await ctx.reply("🤖 Thinking…")
     try:
-        answer = await _openrouter_completion(
-            ctx.bot.http,
-            api_key=settings.api_key,
-            model=settings.model,
-            prompt=prompt,
-        )
+        answer = await _rapidapi_completion(ctx.bot.http, prompt=prompt)
     finally:
         await _delete_status(status)
 
-    # Model output is untrusted text. Disabling Telegram's Markdown parser
-    # prevents unmatched formatting characters from making delivery fail.
-    await ctx.reply(answer, parse_mode=None)
+    await ctx.reply(answer)
 
 
-async def _openrouter_completion(
-    http: Any,
-    *,
-    api_key: str,
-    model: str,
-    prompt: str,
-) -> str:
-    """Request one non-streaming chat completion and return its text."""
+async def _rapidapi_completion(http: Any, *, prompt: str) -> str:
+    """Request one chat completion from RapidAPI and return its text."""
     response = await http.request(
         "POST",
-        OPENROUTER_CHAT_URL,
+        RAPIDAPI_CHAT_URL,
         headers={
-            "Authorization": f"Bearer {api_key}",
+            "x-rapidapi-key": RAPIDAPI_KEY,
+            "x-rapidapi-host": RAPIDAPI_HOST,
             "Content-Type": "application/json",
-            "HTTP-Referer": OPENROUTER_REFERER,
-            "X-OpenRouter-Title": "SelfBot",
         },
         json={
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "stream": False,
+            "model": RAPIDAPI_MODEL,
+            "temperature": 1,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
         },
         timeout=120,
-        # Retrying a timed-out generation could duplicate a billable request.
-        # OpenRouter already handles provider fallbacks, so fail safely instead.
+        # A retry after an uncertain timeout can duplicate a billable request.
         retries=0,
     )
 
@@ -82,85 +69,111 @@ async def _openrouter_completion(
         payload = await response.json(content_type=None)
     except Exception as exc:
         raise ProviderError(
-            f"OpenRouter sent an invalid response (HTTP {response.status})."
+            f"RapidAPI sent an invalid response (HTTP {response.status})."
         ) from exc
 
     if response.status >= 400:
-        raise ProviderError(_format_openrouter_error(payload, response.status))
+        raise ProviderError(_format_rapidapi_error(payload, response.status))
 
-    # OpenRouter can report an error in an HTTP 200 response when generation
-    # fails after processing has started.
     if isinstance(payload, Mapping) and payload.get("error"):
-        raise ProviderError(_format_openrouter_error(payload, response.status))
+        raise ProviderError(_format_rapidapi_error(payload, response.status))
 
     return _extract_answer(payload)
 
 
 def _extract_answer(payload: Any) -> str:
-    """Validate a chat-completion response and collect text content parts."""
+    """Extract text from common chat-completion response shapes."""
+    if isinstance(payload, str):
+        answer = payload.strip()
+        if answer:
+            return answer
+        raise ProviderError("RapidAPI returned an empty completion.")
+
     if not isinstance(payload, Mapping):
-        raise ProviderError("OpenRouter returned an unexpected response.")
+        raise ProviderError("RapidAPI returned an unexpected response.")
 
     choices = payload.get("choices")
-    if not isinstance(choices, list) or not choices or not isinstance(choices[0], Mapping):
-        raise ProviderError("OpenRouter returned no completion choices.")
+    if isinstance(choices, list) and choices and isinstance(choices[0], Mapping):
+        choice = choices[0]
+        message = choice.get("message")
+        content = message.get("content") if isinstance(message, Mapping) else None
+        answer = _content_text(content)
+        if not answer and isinstance(choice.get("text"), str):
+            answer = choice["text"].strip()
+        if answer:
+            return answer
 
-    choice = choices[0]
-    message = choice.get("message")
-    content = message.get("content") if isinstance(message, Mapping) else None
+    message = payload.get("message")
+    if isinstance(message, Mapping):
+        answer = _content_text(message.get("content"))
+        if answer:
+            return answer
+    elif isinstance(message, str) and message.strip():
+        return message.strip()
+
+    for key in ("response", "content", "text", "answer", "result"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    data = payload.get("data")
+    if isinstance(data, (str, Mapping)):
+        try:
+            return _extract_answer(data)
+        except ProviderError:
+            pass
+
+    raise ProviderError("RapidAPI returned an empty completion.")
+
+
+def _content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content.strip()
+    if not isinstance(content, list):
+        return ""
 
     pieces: list[str] = []
-    if isinstance(content, str):
-        pieces.append(content)
-    elif isinstance(content, list):
-        for part in content:
-            if isinstance(part, str):
-                pieces.append(part)
-            elif isinstance(part, Mapping) and isinstance(part.get("text"), str):
-                pieces.append(part["text"])
-
-    # A few OpenAI-compatible providers still use the legacy choice.text field.
-    if not pieces and isinstance(choice.get("text"), str):
-        pieces.append(choice["text"])
-
-    answer = "\n".join(pieces).strip()
-    if not answer:
-        raise ProviderError("OpenRouter returned an empty completion.")
-    return answer
+    for part in content:
+        if isinstance(part, str):
+            pieces.append(part)
+        elif isinstance(part, Mapping) and isinstance(part.get("text"), str):
+            pieces.append(part["text"])
+    return "\n".join(pieces).strip()
 
 
-def _format_openrouter_error(payload: Any, status: int) -> str:
-    """Turn OpenRouter's documented error envelope into an actionable message."""
-    code = status
+def _format_rapidapi_error(payload: Any, status: int) -> str:
+    """Turn a RapidAPI error response into a short, actionable message."""
     detail = ""
-
     if isinstance(payload, Mapping):
         error = payload.get("error")
         if isinstance(error, Mapping):
-            raw_code = error.get("code")
-            if isinstance(raw_code, int):
-                code = raw_code
-            elif isinstance(raw_code, str) and raw_code.isdigit():
-                code = int(raw_code)
-            if isinstance(error.get("message"), str):
-                detail = error["message"].strip()
+            for key in ("message", "detail", "error"):
+                if isinstance(error.get(key), str):
+                    detail = error[key].strip()
+                    break
         elif isinstance(error, str):
             detail = error.strip()
 
+        if not detail:
+            for key in ("message", "detail"):
+                if isinstance(payload.get(key), str):
+                    detail = payload[key].strip()
+                    break
+
     friendly = {
-        401: "OpenRouter rejected the API key. Check `OPENROUTER_API_KEY`.",
-        402: "Your OpenRouter account has insufficient credits.",
-        408: "OpenRouter timed out. Try again.",
-        429: "OpenRouter's rate limit was reached. Try again later.",
-        502: "The selected model is temporarily unavailable on OpenRouter.",
-        503: "OpenRouter has no available provider for the selected model.",
-    }.get(code)
+        401: "RapidAPI rejected the API key.",
+        403: "RapidAPI denied access. Check the API subscription.",
+        408: "The RapidAPI request timed out. Try again.",
+        429: "The RapidAPI quota or rate limit was reached. Try again later.",
+        502: "The AI service behind RapidAPI is temporarily unavailable.",
+        503: "The AI service behind RapidAPI is temporarily unavailable.",
+    }.get(status)
     if friendly:
         return friendly
 
     if detail:
-        return f"OpenRouter error (HTTP {code}): {truncate(detail, 300)}"
-    return f"OpenRouter returned HTTP {code}."
+        return f"RapidAPI error (HTTP {status}): {truncate(detail, 300)}"
+    return f"RapidAPI returned HTTP {status}."
 
 
 async def _delete_status(message: Any) -> None:
