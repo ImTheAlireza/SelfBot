@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from conftest import FakeEvent
+from selfbot.plugins import core as core_plugin
 from selfbot.services import supervisor as sup
 from selfbot.services.supervisor import (
     STATE_EMOJI,
@@ -308,8 +309,10 @@ async def test_restart_with_supervisorctl(bot, registry, stub_ctl):
 
 
 @pytest.mark.asyncio
-async def test_restart_without_supervisorctl_exits_process(bot, registry, isolated_env, monkeypatch):
-    """Without supervisorctl, restart exits the process so Docker restarts it."""
+async def test_restart_without_supervisorctl_reexecs_process(
+    bot, registry, isolated_env, monkeypatch
+):
+    """Without supervisorctl, restart replaces the running Python process."""
     import dataclasses
 
     monkeypatch.setattr(sup.sys, "executable", str(isolated_env / "nowhere" / "python"))
@@ -322,6 +325,37 @@ async def test_restart_without_supervisorctl_exits_process(bot, registry, isolat
     await registry.dispatch(bot, event, "self restart")
 
     assert any("Restarting" in r for r in event.replies)
+    assert any("this process" in r for r in event.replies)
+
+
+def test_direct_restart_reexecs_current_interpreter_and_preserves_args(monkeypatch):
+    calls = []
+    monkeypatch.setattr(core_plugin.sys, "executable", "/venv/bin/python")
+    monkeypatch.setattr(
+        core_plugin.sys,
+        "argv",
+        ["/project/src/selfbot/__main__.py", "--env-file", "production.env"],
+    )
+    monkeypatch.setattr(
+        core_plugin.os,
+        "execv",
+        lambda executable, argv: calls.append((executable, argv)),
+    )
+
+    core_plugin._restart_process()
+
+    assert calls == [
+        (
+            "/venv/bin/python",
+            [
+                "/venv/bin/python",
+                "-m",
+                "selfbot",
+                "--env-file",
+                "production.env",
+            ],
+        )
+    ]
 
 
 # ---------------------------------------------------------------------------

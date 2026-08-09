@@ -90,7 +90,7 @@ Everything is environment-driven; no secret ever goes in source. See
 | `OPENROUTER_MODEL` | | `~openai/gpt-latest` | OpenRouter model slug used by `gpt` |
 | `STARTUP_NOTIFY` | | `me` | Online message target: `me`, `off`, or a chat ID |
 | `LOG_CHANNEL_ID` | | — | Mirror warnings/errors to a private channel |
-| `SUPERVISOR_PROCESS` | | `selfbot` | Enables `self status` / `self restart` |
+| `SUPERVISOR_PROCESS` | | `selfbot` | Enables supervisor-backed status and restarts |
 | `MAX_FILE_SIZE_MB` | | `512` | Ceiling on downloads and uploads |
 
 <details>
@@ -120,6 +120,10 @@ Commands are typed as plain messages from your own account. Set
 | `whoami` | Your user ID, role and the current chat ID |
 | `status` | Uptime and runtime counters |
 | `self on\|off\|restart\|status\|logs\|diag` | 👑 Process control and supervisor troubleshooting |
+
+`self restart` uses supervisor when available; otherwise it directly replaces
+the current Python process, so it also works when started with
+`python -m selfbot` from a shell.
 
 ### Admin 👑
 | Command | Description |
@@ -231,7 +235,7 @@ usage hint rather than a traceback.
 ```bash
 pip install -e ".[dev,full]"
 
-pytest                      # 231 tests
+pytest                      # 232 tests
 pytest --cov=selfbot        # with coverage
 ruff check src tests        # lint
 mypy src/selfbot            # type check
