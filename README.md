@@ -20,12 +20,13 @@
 
 ## What it does
 
-41 commands for file manipulation, timers, stickers, QR codes, weather,
+43 commands for AI, file manipulation, timers, stickers, QR codes, weather,
 dictionaries and chat automation — all driven from your own Telegram account by
 typing commands into any chat.
 
 | | |
 |---|---|
+| 🧠 **AI** | Ask the latest GPT model—or any configured OpenRouter model—with `gpt <prompt>`. |
 | 📁 **Files** | Zip/unzip with AES passwords, batch queues, rename, audio tag editing, PDF page extraction. |
 | ⏰ **Timers** | Live-updating countdowns that survive restarts. |
 | 🎨 **Stickers** | Render text to stickers and manage packs via a helper bot. |
@@ -85,6 +86,8 @@ Everything is environment-driven; no secret ever goes in source. See
 | `SUDO_USER_ID` | ✅ | — | Your user ID; grants owner rights |
 | `DATABASE_URL` | | `sqlite+aiosqlite:///./data/selfbot.db` | SQLite or MySQL |
 | `COMMAND_PREFIX` | | *(none)* | Set to `.` to require `.help` |
+| `OPENROUTER_API_KEY` | for `gpt` | — | OpenRouter key for AI prompts |
+| `OPENROUTER_MODEL` | | `~openai/gpt-latest` | OpenRouter model slug used by `gpt` |
 | `STARTUP_NOTIFY` | | `me` | Online message target: `me`, `off`, or a chat ID |
 | `LOG_CHANNEL_ID` | | — | Mirror warnings/errors to a private channel |
 | `SUPERVISOR_PROCESS` | | `selfbot` | Enables `self status` / `self restart` |
@@ -124,6 +127,15 @@ Commands are typed as plain messages from your own account. Set
 | `setadmin <id\|@user>` | Let another user run commands |
 | `remadmin <id>` | Revoke access |
 | `adminlist` | List authorised users |
+
+### AI
+| Command | Description |
+|---|---|
+| `gpt <prompt>` | Ask the configured GPT model through OpenRouter |
+
+Set `OPENROUTER_API_KEY` to enable this command. The default model is
+`~openai/gpt-latest`; override it with any OpenRouter model slug via
+`OPENROUTER_MODEL`.
 
 ### Messaging
 | Command | Description |
@@ -219,7 +231,7 @@ usage hint rather than a traceback.
 ```bash
 pip install -e ".[dev,full]"
 
-pytest                      # 222 tests
+pytest                      # 231 tests
 pytest --cov=selfbot        # with coverage
 ruff check src tests        # lint
 mypy src/selfbot            # type check

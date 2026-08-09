@@ -211,15 +211,46 @@ def test_load_config_reads_env_file(monkeypatch, tmp_path):
     assert config.sudo_user_id == 999
 
 
+def test_load_config_reads_openrouter_settings(monkeypatch, tmp_path):
+    for key in (
+        "TELEGRAM_API_ID",
+        "TELEGRAM_API_HASH",
+        "SUDO_USER_ID",
+        "OPENROUTER_API_KEY",
+        "OPENROUTER_MODEL",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    env = tmp_path / ".env"
+    env.write_text(
+        "TELEGRAM_API_ID=1\n"
+        "TELEGRAM_API_HASH=hash\n"
+        "SUDO_USER_ID=42\n"
+        "OPENROUTER_API_KEY=secret-key\n"
+        "OPENROUTER_MODEL=openai/gpt-5-mini\n"
+    )
+
+    config = load_config(env_file=env)
+    assert config.openrouter.api_key == "secret-key"
+    assert config.openrouter.model == "openai/gpt-5-mini"
+    assert config.openrouter.enabled
+
+
 def test_config_describe_hides_secrets(config):
     import dataclasses
 
+    from selfbot.config import OpenRouterConfig
+
     config = dataclasses.replace(
-        config, database_url="mysql+aiomysql://user:supersecret@host/db"
+        config,
+        database_url="mysql+aiomysql://user:supersecret@host/db",
+        openrouter=OpenRouterConfig(api_key="openrouter-secret"),
     )
     described = config.describe()
     assert "supersecret" not in described
+    assert "openrouter-secret" not in described
     assert "***" in described
+    assert "openrouter   : enabled" in described
 
 
 # ---------------------------------------------------------------------------

@@ -104,7 +104,7 @@ python -m selfbot --check
 Expected:
 
 ```
-✅ Configuration valid — 41 commands registered.
+✅ Configuration valid — 43 commands registered.
 
 session      : ./data/selfbot
 database     : sqlite+aiosqlite:///./data/selfbot.db
@@ -140,6 +140,21 @@ Without this, `topdf fa` and Persian `stick` text render as boxes:
 curl -Lo assets/fonts/Vazirmatn-Regular.ttf \
   https://github.com/rastikerdar/vazirmatn/raw/master/fonts/ttf/Vazirmatn-Regular.ttf
 ```
+
+### Step 9 — Enable the `gpt` command
+
+Create an API key at [OpenRouter](https://openrouter.ai/settings/keys), then add
+it to `.env`:
+
+```env
+OPENROUTER_API_KEY=your_openrouter_key
+OPENROUTER_MODEL=~openai/gpt-latest
+```
+
+Restart the bot and try `gpt What is the meaning of life?`. The model setting is
+optional; the default alias always targets OpenAI's latest flagship GPT model.
+You can replace it with any model slug listed at
+[openrouter.ai/models](https://openrouter.ai/models).
 
 ### Step 10 — Enable CI on GitHub
 

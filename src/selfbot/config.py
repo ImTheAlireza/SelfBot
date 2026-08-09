@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .errors import ConfigError
 
-__all__ = ["Config", "load_config"]
+__all__ = ["Config", "OpenRouterConfig", "load_config"]
 
 
 def _env(key: str, default: str = "") -> str:
@@ -89,6 +89,23 @@ class SpamConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class OpenRouterConfig:
+    """OpenRouter chat-completion settings.
+
+    The API key is optional at startup so the rest of the bot still works when
+    AI is not configured. The ``gpt`` command reports the missing setting when
+    invoked.
+    """
+
+    api_key: str = ""
+    model: str = "~openai/gpt-latest"
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.api_key)
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     telegram: TelegramConfig
     sticker: StickerConfig
@@ -106,6 +123,10 @@ class Config:
     startup_notify: str
     max_file_size_mb: int
     temp_ttl_minutes: int
+
+    # Defaults keep direct Config construction backwards-compatible while the
+    # environment loader supplies the user's real values.
+    openrouter: OpenRouterConfig = field(default_factory=OpenRouterConfig)
 
     # Populated lazily so tests can point them somewhere temporary.
     _dirs_created: bool = field(default=False, compare=False)
@@ -135,6 +156,7 @@ class Config:
             f"sudo user    : {self.sudo_user_id}",
             f"prefix       : {self.command_prefix or '(none)'}",
             f"stickers     : {'enabled' if self.sticker.enabled else 'disabled'}",
+            f"openrouter   : {'enabled' if self.openrouter.enabled else 'disabled'}",
             f"supervisor   : {'enabled' if self.supervisor.enabled else 'disabled'}",
             f"log channel  : {self.log_channel_id or '(none)'}",
         ]
@@ -242,6 +264,10 @@ def load_config(
         startup_notify=_env("STARTUP_NOTIFY", "me") or "me",
         max_file_size_mb=_env_int("MAX_FILE_SIZE_MB", 512) or 512,
         temp_ttl_minutes=_env_int("TEMP_TTL_MINUTES", 60) or 60,
+        openrouter=OpenRouterConfig(
+            api_key=_env("OPENROUTER_API_KEY"),
+            model=_env("OPENROUTER_MODEL", "~openai/gpt-latest") or "~openai/gpt-latest",
+        ),
     )
 
 

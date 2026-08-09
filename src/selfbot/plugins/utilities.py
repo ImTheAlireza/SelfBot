@@ -456,7 +456,7 @@ async def cmd_hourly(ctx: Context) -> None:
         for hour in day.get("hourly", []):
             all_hourly.append(hour)
 
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timedelta, timezone
 
     # Use Tehran's timezone (UTC+3:30) to align the "now" hour.
     tehran_tz = timezone(timedelta(hours=3, minutes=30))
