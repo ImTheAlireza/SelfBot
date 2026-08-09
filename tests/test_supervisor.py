@@ -288,8 +288,8 @@ async def test_status_command_without_process_name_explains(bot, registry):
 
 
 @pytest.mark.asyncio
-async def test_restart_with_supervisorctl(bot, registry, stub_ctl):
-    """Restart via supervisorctl when it's available."""
+async def test_restart_bypasses_supervisorctl(bot, registry, stub_ctl, monkeypatch):
+    """A managed bot must re-exec instead of deadlocking on supervisorctl."""
     import dataclasses
 
     bot.config = dataclasses.replace(
@@ -300,12 +300,17 @@ async def test_restart_with_supervisorctl(bot, registry, stub_ctl):
             executable=str(stub_ctl),
         ),
     )
+    monkeypatch.setattr(
+        core_plugin,
+        "resolve_supervisorctl",
+        lambda *_: pytest.fail("restart must not invoke supervisorctl"),
+    )
 
     event = FakeEvent(raw_text="self restart")
     await registry.dispatch(bot, event, "self restart")
 
     assert not bot.confirm_prompts, "restart should not ask for confirmation"
-    assert any("Restarting" in r for r in event.replies)
+    assert any("Restarting this process" in r for r in event.replies)
 
 
 @pytest.mark.asyncio

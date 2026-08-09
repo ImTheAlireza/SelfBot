@@ -216,7 +216,7 @@ Log in **once interactively** before enabling the service.
 </details>
 
 <details>
-<summary><b>supervisor</b> — enables <code>self status/logs</code> and managed restarts</summary>
+<summary><b>supervisor</b> — enables <code>self status/logs</code></summary>
 
 **1. Define the program** in your `supervisord.conf`:
 

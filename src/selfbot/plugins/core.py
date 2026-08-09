@@ -151,7 +151,7 @@ async def cmd_self(ctx: Context) -> None:
         ctx.bot.active = False
         await ctx.reply("⏸ Bot is now **paused**. Send `self on` to resume.")
     elif action == "restart":
-        await _supervisor_restart(ctx)
+        await _restart_bot(ctx)
     elif action == "status":
         await _supervisor_status(ctx)
     elif action == "logs":
@@ -206,51 +206,15 @@ def _not_found_help(ctx: Context, exc: SupervisorNotFound) -> str:
     )
 
 
-async def _supervisor_restart(ctx: Context) -> None:
-    """Restart through supervisorctl, or re-exec this process directly."""
-    supervisor = ctx.config.supervisor
+async def _restart_bot(ctx: Context) -> None:
+    """Restart by replacing the current interpreter.
 
-    # If supervisorctl is configured and can be found, use it.
-    if supervisor.enabled and resolve_supervisorctl(supervisor.executable):
-        runner = SupervisorRunner(
-            process_name=supervisor.process_name,
-            config_path=supervisor.config_path,
-            executable=supervisor.executable,
-        )
-        try:
-            runner.resolve()
-        except SupervisorNotFound as exc:
-            await ctx.reply(_not_found_help(ctx, exc))
-            return
-
-        await ctx.reply(
-            f"🔄 Restarting `{runner.process_name}` via supervisorctl…\n"
-            "I'll go offline for a few seconds."
-        )
-
-        try:
-            result = await runner.restart()
-        except asyncio.TimeoutError:
-            logger.info("supervisorctl restart timed out (likely restarting now)")
-            return
-        except SupervisorNotFound as exc:
-            await ctx.reply(_not_found_help(ctx, exc))
-            return
-        except OSError as exc:
-            await ctx.reply(f"❌ Could not run supervisorctl: `{exc}`")
-            return
-
-        if not result.ok:
-            await ctx.reply(
-                f"❌ Restart failed (exit {result.returncode}):\n"
-                f"`{truncate(result.output or 'no output', 500)}`"
-            )
-        elif result.output:
-            logger.info("supervisorctl restart: %s", result.output)
-        return
-
-    # No supervisorctl: replace the current interpreter directly. This also
-    # works for foreground and shared-hosting processes with no service manager.
+    Never call ``supervisorctl restart`` from inside the supervised process: it
+    waits for this process to exit while our event loop waits for
+    ``supervisorctl`` to finish, creating a deadlock until supervisord kills the
+    bot at ``stopwaitsecs``. Re-exec keeps the same PID, so supervisord continues
+    monitoring it without participating in the restart.
+    """
     await ctx.reply("🔄 Restarting this process… I'll be back in a few seconds.")
     logger.info("Restart requested; scheduling in-process re-exec")
     # Give Telegram time to send the acknowledgement before replacing Python.
