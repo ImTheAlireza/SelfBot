@@ -145,7 +145,7 @@ returns HTTP 429, the command automatically retries through Adult GPT.
 | `spam <message> <count>` | Repeat a message, rate-limit aware |
 | `cancel` | Stop your running spam task |
 | `purge <count\|type> [--all-users]` | 👑 Delete your messages; add the flag for everyone's |
-| `info [user]` | User details (reply, mention, or yourself) |
+| `info [user]` | User details and profile photo (reply, mention, or yourself) |
 | `qreply set\|remove\|list\|info` | Manage `-alias` shortcuts |
 | `-<alias>` | Expand a quick reply in place |
 
@@ -233,7 +233,7 @@ usage hint rather than a traceback.
 ```bash
 pip install -e ".[dev,full]"
 
-pytest                      # 235 tests
+pytest                      # 236 tests
 pytest --cov=selfbot        # with coverage
 ruff check src tests        # lint
 mypy src/selfbot            # type check

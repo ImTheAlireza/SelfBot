@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -101,6 +102,49 @@ async def test_remadmin_rejects_non_numeric(bot, registry):
     event = FakeEvent(raw_text="remadmin notanumber")
     await registry.dispatch(bot, event, "remadmin notanumber")
     assert any("numeric" in r.lower() for r in event.replies)
+
+
+# ---------------------------------------------------------------------------
+# User info
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_info_sends_profile_picture_as_a_named_photo(bot, registry):
+    entity = type(
+        "Entity",
+        (),
+        {
+            "id": 123,
+            "first_name": "Alice",
+            "last_name": "Example",
+            "username": "alice",
+            "premium": False,
+            "bot": False,
+            "photo": object(),
+        },
+    )()
+    bot.client.entities["@alice"] = entity
+
+    async def download_profile_photo(target, *, file, download_big):
+        assert target is entity
+        assert file is bytes
+        assert download_big is True
+        return b"\xff\xd8\xff\xe0fake-jpeg"
+
+    bot.client.download_profile_photo = download_profile_photo
+    event = FakeEvent(raw_text="info @alice")
+
+    await registry.dispatch(bot, event, event.raw_text)
+
+    assert len(bot.client.sent_files) == 1
+    upload = bot.client.sent_files[0]
+    uploaded_file = upload["file"]
+    assert isinstance(uploaded_file, BytesIO)
+    assert uploaded_file.name == "profile_123.jpg"
+    assert uploaded_file.closed
+    assert upload["force_document"] is False
+    assert "Alice Example" in upload["caption"]
 
 
 # ---------------------------------------------------------------------------

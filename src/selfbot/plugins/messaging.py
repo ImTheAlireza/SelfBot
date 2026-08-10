@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from io import BytesIO
 
 from telethon.errors import ChatWriteForbiddenError, FloodWaitError
 from telethon.tl.functions.users import GetFullUserRequest
@@ -251,7 +252,20 @@ async def cmd_info(ctx: Context) -> None:
 
     await status.delete()
     if photo:
-        await ctx.client.send_file(ctx.chat_id, photo, caption=caption)
+        # Raw bytes have no filename, so Telethon cannot infer an image MIME
+        # type and uploads them as an unnamed document. A named in-memory JPEG
+        # makes the profile picture render as a Telegram photo instead.
+        photo_file = BytesIO(photo)
+        photo_file.name = f"profile_{entity.id}.jpg"  # type: ignore[attr-defined]
+        try:
+            await ctx.client.send_file(
+                ctx.chat_id,
+                photo_file,
+                caption=caption,
+                force_document=False,
+            )
+        finally:
+            photo_file.close()
     else:
         await ctx.reply(caption)
 
