@@ -144,13 +144,18 @@ returns HTTP 429, the command automatically retries through Adult GPT.
 |---|---|
 | `spam <message> <count>` | Repeat a message, rate-limit aware |
 | `cancel` | Stop your running spam task |
-| `purge <count\|type> [--all-users]` | 👑 Delete your messages; add the flag for everyone's |
+| `del <count\|type> [-me]` | 👑 Delete messages in the current chat; `-me` limits it to yours |
 | `info [user]` | User details and profile photo (reply, mention, or yourself) |
 | `qreply set\|remove\|list\|info` | Manage `-alias` shortcuts |
 | `-<alias>` | Expand a quick reply in place |
 
-`purge` types: `photos`, `videos`, `voices`, `videomsgs`, `musics`, `files`,
-`stickers`, `gifs`, `links`, `all`.
+`del` always operates on the chat where the command was sent and can never
+select another chat. Without `-me`, it targets messages from everyone that your
+account is allowed to delete. Append `-me` to target only your messages, for
+example `del 400 -me`, `del photos -me`, or `del all -me`.
+
+Types: `photos`, `videos`, `voices`, `videomsgs`, `musics`, `files`, `stickers`,
+`gifs`, `links`, `all`.
 
 ### Files
 | Command | Description |
@@ -233,7 +238,7 @@ usage hint rather than a traceback.
 ```bash
 pip install -e ".[dev,full]"
 
-pytest                      # 236 tests
+pytest                      # 242 tests
 pytest --cov=selfbot        # with coverage
 ruff check src tests        # lint
 mypy src/selfbot            # type check
@@ -259,9 +264,8 @@ The original single-file `self.py` was replaced by the `src/selfbot/` package.
 3. Run `python -m selfbot` instead of `python self.py`.
 4. Your existing MySQL data still works — set `DATABASE_URL` to point at it.
 
-Renamed commands: `zipfile`→`zip` (alias kept), `del`→`purge` (alias kept),
-`dw`→`weather` (alias kept), `hw`→`hourly` (alias kept), `qradv` folded into
-`qr --fg/--bg`.
+Renamed commands: `zipfile`→`zip` (alias kept), `dw`→`weather` (alias kept),
+`hw`→`hourly` (alias kept), and `qradv` was folded into `qr --fg/--bg`.
 
 ### What changed under the hood
 
