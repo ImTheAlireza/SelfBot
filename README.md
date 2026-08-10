@@ -136,7 +136,8 @@ which can deadlock when invoked by the process being restarted.
 | `gpt <prompt>` | Ask `GPT_5_4_high` through ChatGPT API8 on RapidAPI |
 
 The RapidAPI endpoint, model, temperature, system prompt, and credentials are
-built into the AI plugin; no `.env` configuration is required.
+built into the AI plugin; no `.env` configuration is required. If ChatGPT API8
+returns HTTP 429, the command automatically retries through Adult GPT.
 
 ### Messaging
 | Command | Description |
@@ -232,7 +233,7 @@ usage hint rather than a traceback.
 ```bash
 pip install -e ".[dev,full]"
 
-pytest                      # 234 tests
+pytest                      # 235 tests
 pytest --cov=selfbot        # with coverage
 ruff check src tests        # lint
 mypy src/selfbot            # type check

@@ -19,6 +19,10 @@ RAPIDAPI_KEY = "a58dc11fa1msha5c73c40f77f5a6p1a796fjsndf7d1e46f55f"
 RAPIDAPI_MODEL = "GPT_5_4_high"
 SYSTEM_PROMPT = "Format your relies with markdown when applicable"
 
+BACKUP_RAPIDAPI_HOST = "adult-gpt.p.rapidapi.com"
+BACKUP_RAPIDAPI_CHAT_URL = f"https://{BACKUP_RAPIDAPI_HOST}/adultgpt"
+BACKUP_RAPIDAPI_GENERE = "ai-gf-1"
+
 
 @command(
     "gpt",
@@ -28,7 +32,7 @@ SYSTEM_PROMPT = "Format your relies with markdown when applicable"
     examples=("gpt What is the meaning of life?",),
 )
 async def cmd_gpt(ctx: Context) -> None:
-    """Ask the configured Gemini model through RapidAPI."""
+    """Ask GPT through RapidAPI, with an automatic quota fallback."""
     prompt = ctx.raw_args.strip()
     if not prompt:
         raise UsageError(f"Usage: `{ctx.config.command_prefix}gpt <prompt>`")
@@ -68,8 +72,54 @@ async def _rapidapi_completion(http: Any, *, prompt: str) -> str:
     try:
         payload = await response.json(content_type=None)
     except Exception as exc:
+        if response.status == 429:
+            logger.warning("Primary RapidAPI quota reached; trying the backup API")
+            return await _backup_rapidapi_completion(http, prompt=prompt)
         raise ProviderError(
             f"RapidAPI sent an invalid response (HTTP {response.status})."
+        ) from exc
+
+    if response.status == 429:
+        logger.warning("Primary RapidAPI quota reached; trying the backup API")
+        return await _backup_rapidapi_completion(http, prompt=prompt)
+
+    if response.status >= 400:
+        raise ProviderError(_format_rapidapi_error(payload, response.status))
+
+    if isinstance(payload, Mapping) and payload.get("error"):
+        raise ProviderError(_format_rapidapi_error(payload, response.status))
+
+    return _extract_answer(payload)
+
+
+async def _backup_rapidapi_completion(http: Any, *, prompt: str) -> str:
+    """Use Adult GPT when the primary RapidAPI plan returns HTTP 429."""
+    response = await http.request(
+        "POST",
+        BACKUP_RAPIDAPI_CHAT_URL,
+        headers={
+            "x-rapidapi-key": RAPIDAPI_KEY,
+            "x-rapidapi-host": BACKUP_RAPIDAPI_HOST,
+            "Content-Type": "application/json",
+        },
+        json={
+            "messages": [{"role": "user", "content": prompt}],
+            "genere": BACKUP_RAPIDAPI_GENERE,
+            "bot_name": "",
+            "temperature": 0.9,
+            "top_k": 10,
+            "top_p": 0.9,
+            "max_tokens": 200,
+        },
+        timeout=120,
+        retries=0,
+    )
+
+    try:
+        payload = await response.json(content_type=None)
+    except Exception as exc:
+        raise ProviderError(
+            f"Backup RapidAPI sent an invalid response (HTTP {response.status})."
         ) from exc
 
     if response.status >= 400:

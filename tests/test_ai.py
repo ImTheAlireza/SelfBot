@@ -9,6 +9,9 @@ import pytest
 from conftest import FakeEvent
 from selfbot.errors import ProviderError
 from selfbot.plugins.ai import (
+    BACKUP_RAPIDAPI_CHAT_URL,
+    BACKUP_RAPIDAPI_GENERE,
+    BACKUP_RAPIDAPI_HOST,
     RAPIDAPI_CHAT_URL,
     RAPIDAPI_HOST,
     RAPIDAPI_KEY,
@@ -38,6 +41,16 @@ class StubHttp:
         return self.response
 
 
+class SequenceHttp(StubHttp):
+    def __init__(self, *responses: StubResponse) -> None:
+        self.responses = list(responses)
+        self.calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    async def request(self, method: str, url: str, **kwargs: Any) -> StubResponse:
+        self.calls.append((method, url, kwargs))
+        return self.responses.pop(0)
+
+
 @pytest.mark.asyncio
 async def test_gpt_sends_prompt_to_rapidapi(bot, registry):
     bot.http = StubHttp(
@@ -64,6 +77,39 @@ async def test_gpt_sends_prompt_to_rapidapi(bot, registry):
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": "What is the meaning of life?"},
         ],
+    }
+    assert kwargs["timeout"] == 120
+    assert kwargs["retries"] == 0
+
+
+@pytest.mark.asyncio
+async def test_gpt_uses_backup_api_when_primary_is_rate_limited(bot, registry):
+    bot.http = SequenceHttp(
+        StubResponse({"message": "Too many requests"}, status=429),
+        StubResponse({"response": "Backup answer"}),
+    )
+    event = FakeEvent(raw_text="gpt explain this")
+
+    await registry.dispatch(bot, event, event.raw_text)
+
+    assert event.replies[-1] == "Backup answer"
+    assert len(bot.http.calls) == 2
+    method, url, kwargs = bot.http.calls[1]
+    assert method == "POST"
+    assert url == BACKUP_RAPIDAPI_CHAT_URL
+    assert kwargs["headers"] == {
+        "x-rapidapi-key": RAPIDAPI_KEY,
+        "x-rapidapi-host": BACKUP_RAPIDAPI_HOST,
+        "Content-Type": "application/json",
+    }
+    assert kwargs["json"] == {
+        "messages": [{"role": "user", "content": "explain this"}],
+        "genere": BACKUP_RAPIDAPI_GENERE,
+        "bot_name": "",
+        "temperature": 0.9,
+        "top_k": 10,
+        "top_p": 0.9,
+        "max_tokens": 200,
     }
     assert kwargs["timeout"] == 120
     assert kwargs["retries"] == 0
