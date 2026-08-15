@@ -36,6 +36,7 @@ __all__ = ["SelfBot"]
 
 _REACTION_CACHE_TTL = 300.0
 _WELCOME_DEDUP_TTL = 300.0
+_WELCOME_POLL_INTERVAL = 30.0
 
 
 class SelfBot:
@@ -78,6 +79,8 @@ class SelfBot:
         self._reaction_cache: dict[str, str] = {}
         self._reaction_cache_at = 0.0
         self._recent_welcomes: dict[tuple[int, int], float] = {}
+        self._welcome_log_ids: dict[int, int] = {}
+        self._welcome_poll_warned: set[int] = set()
         self._telegram_log_handler: TelegramLogHandler | None = None
         self._background: set[asyncio.Task[Any]] = set()
         self._shutting_down = False
@@ -140,6 +143,7 @@ class SelfBot:
         self._attach_telegram_logging()
         restored, expired = await self._restore_timers()
         self._spawn(self._janitor(), name="janitor")
+        self._spawn(self._welcome_watcher(), name="welcome-watcher")
 
         logger.info("Ready — %d commands registered", len(self.registry))
         await self._announce_online(restored, expired)
@@ -626,6 +630,113 @@ class SelfBot:
             except Exception:
                 logger.debug("Refetching message %s failed", msg_id, exc_info=True)
         return None
+
+    async def _welcome_watcher(self) -> None:
+        """Poll the admin log of welcome-enabled channels for fresh joins.
+
+        Realtime detection relies on the join service message, which a
+        cleaner bot can delete (or the group can hide) before we act on it.
+        User accounts do not receive ``UpdateChannelParticipant`` — that
+        update is bot-only — but an *admin* account can read the channel's
+        admin log, which records every join and join-request approval. The
+        dedup guard keeps this from double-greeting users the realtime path
+        already handled.
+        """
+        while True:
+            try:
+                await asyncio.sleep(_WELCOME_POLL_INTERVAL)
+                if not self.active:
+                    continue
+                await self._poll_welcome_joins()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("Welcome watcher pass failed", exc_info=True)
+
+    async def _poll_welcome_joins(self) -> None:
+        try:
+            welcomes = await self.db.list_welcomes()
+        except Exception:
+            logger.debug("Could not list welcomes", exc_info=True)
+            return
+
+        for welcome in welcomes:
+            if not welcome.enabled:
+                self._welcome_log_ids.pop(welcome.chat_id, None)
+                continue
+            real_id, peer_type = utils.resolve_id(welcome.chat_id)
+            if peer_type is not types.PeerChannel:
+                continue  # legacy small groups have no admin log
+            await self._poll_one_admin_log(welcome, real_id)
+
+    async def _poll_one_admin_log(self, welcome: Any, channel_id: int) -> None:
+        chat_id = welcome.chat_id
+        last_seen = self._welcome_log_ids.get(chat_id)
+        try:
+            result = await self.client(
+                functions.channels.GetAdminLogRequest(
+                    channel=channel_id,
+                    q="",
+                    max_id=0,
+                    min_id=last_seen or 0,
+                    limit=20 if last_seen else 1,
+                    events_filter=types.ChannelAdminLogEventsFilter(join=True, invite=True),
+                )
+            )
+        except FloodWaitError as exc:
+            logger.debug("Admin log flood wait %ss for chat %s", exc.seconds, chat_id)
+            return
+        except Exception as exc:
+            if chat_id not in self._welcome_poll_warned:
+                self._welcome_poll_warned.add(chat_id)
+                logger.warning(
+                    "Welcome: cannot read the admin log of chat %s (%s: %s); "
+                    "join detection there relies on service messages only",
+                    chat_id,
+                    type(exc).__name__,
+                    exc,
+                )
+            return
+
+        self._welcome_poll_warned.discard(chat_id)
+        events_list = list(getattr(result, "events", []) or [])
+        if events_list:
+            self._welcome_log_ids[chat_id] = max(e.id for e in events_list)
+        elif last_seen is None:
+            self._welcome_log_ids[chat_id] = 0
+
+        if last_seen is None:
+            return  # first pass only records the position; no back-greeting
+
+        users_by_id = {u.id: u for u in getattr(result, "users", []) or []}
+        join_actions = (
+            types.ChannelAdminLogEventActionParticipantJoin,
+            types.ChannelAdminLogEventActionParticipantJoinByInvite,
+            types.ChannelAdminLogEventActionParticipantJoinByRequest,
+        )
+        joined: list[Any] = []
+        for log_event in sorted(events_list, key=lambda e: e.id):
+            if not isinstance(log_event.action, join_actions):
+                continue
+            user = users_by_id.get(log_event.user_id)
+            if user is None:
+                try:
+                    user = await self.client.get_entity(log_event.user_id)
+                except Exception:
+                    logger.debug(
+                        "Could not resolve joiner %s from admin log", log_event.user_id,
+                        exc_info=True,
+                    )
+                    continue
+            joined.append(user)
+
+        if joined:
+            logger.info(
+                "Welcome: %d join(s) found in the admin log of chat %s",
+                len(joined),
+                chat_id,
+            )
+            await self._welcome_users(welcome, chat_id, joined)
 
     async def _enabled_welcome(self, chat_id: int) -> Any:
         """The chat's welcome row when it exists and is switched on, else None."""

@@ -550,6 +550,189 @@ async def test_paused_bot_ignores_join_requests(config, db, registry):
 
 
 # ---------------------------------------------------------------------------
+# Admin log polling (joins whose service message was deleted)
+# ---------------------------------------------------------------------------
+
+
+class AdminLogClient(FakeClient):
+    """FakeClient that also answers GetAdminLogRequest calls."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.admin_log_results: list[Any] = []
+        self.admin_log_requests: list[Any] = []
+        self.admin_log_error: Exception | None = None
+
+    async def __call__(self, request: Any) -> Any:
+        self.admin_log_requests.append(request)
+        if self.admin_log_error is not None:
+            raise self.admin_log_error
+        if self.admin_log_results:
+            return self.admin_log_results.pop(0)
+        from telethon import types
+
+        return types.channels.AdminLogResults(events=[], chats=[], users=[])
+
+
+def make_admin_log_result(entries: list[tuple[int, int, Any]], users: list[Any]) -> Any:
+    """entries: (event_id, user_id, action) triples."""
+    from telethon import types
+
+    events_ = [
+        types.ChannelAdminLogEvent(id=eid, date=None, user_id=uid, action=action)
+        for eid, uid, action in entries
+    ]
+    return types.channels.AdminLogResults(events=events_, chats=[], users=users)
+
+
+def make_selfbot_with_admin_log(config, db, registry) -> SelfBot:
+    bot = SelfBot(config, registry=registry, client=AdminLogClient(), db=db)
+    bot.me = FakeMe()
+    return bot
+
+
+@pytest.mark.asyncio
+async def test_admin_log_join_is_welcomed(config, db, registry):
+    """A join whose service message was deleted still gets a welcome."""
+    from telethon import types, utils
+
+    bot = make_selfbot_with_admin_log(config, db, registry)
+    chat_id = utils.get_peer_id(types.PeerChannel(123))
+    await db.set_welcome_message(chat_id, "hi [name]")
+    await db.set_welcome_enabled(chat_id, True)
+
+    # First pass: establishes the log position, greets nobody.
+    bot.client.admin_log_results.append(
+        make_admin_log_result(
+            [(10, 999, types.ChannelAdminLogEventActionParticipantJoin())],
+            [types.User(id=999, first_name="Old")],
+        )
+    )
+    await bot._poll_welcome_joins()
+    assert bot.client.sent_messages == []
+
+    # Second pass: a new join appeared after the recorded position.
+    bot.client.admin_log_results.append(
+        make_admin_log_result(
+            [(11, 111, types.ChannelAdminLogEventActionParticipantJoin())],
+            [types.User(id=111, first_name="Ali")],
+        )
+    )
+    await bot._poll_welcome_joins()
+    assert bot.client.sent_messages == [(chat_id, "hi Ali")]
+
+
+@pytest.mark.asyncio
+async def test_admin_log_join_by_request_is_welcomed(config, db, registry):
+    from telethon import types, utils
+
+    bot = make_selfbot_with_admin_log(config, db, registry)
+    chat_id = utils.get_peer_id(types.PeerChannel(123))
+    await db.set_welcome_message(chat_id, "سلام [name]")
+    await db.set_welcome_enabled(chat_id, True)
+
+    await bot._poll_welcome_joins()  # records position (empty log)
+
+    invite = types.ChatInviteExported(link="https://t.me/+x", admin_id=1, date=None)
+    action = types.ChannelAdminLogEventActionParticipantJoinByRequest(
+        invite=invite, approved_by=1
+    )
+    bot.client.admin_log_results.append(
+        make_admin_log_result([(5, 111, action)], [types.User(id=111, first_name="علی")])
+    )
+    await bot._poll_welcome_joins()
+    assert bot.client.sent_messages == [(chat_id, "سلام علی")]
+
+
+@pytest.mark.asyncio
+async def test_admin_log_user_already_greeted_is_skipped(config, db, registry):
+    """The realtime path greeted the user; the poller must not repeat it."""
+    from telethon import types, utils
+
+    bot = make_selfbot_with_admin_log(config, db, registry)
+    chat_id = utils.get_peer_id(types.PeerChannel(123))
+    await db.set_welcome_message(chat_id, "hi [name]")
+    await db.set_welcome_enabled(chat_id, True)
+
+    await bot._poll_welcome_joins()  # establish position
+    assert not bot._already_welcomed(chat_id, 111)  # realtime path marks the user
+
+    bot.client.admin_log_results.append(
+        make_admin_log_result(
+            [(7, 111, types.ChannelAdminLogEventActionParticipantJoin())],
+            [types.User(id=111, first_name="Ali")],
+        )
+    )
+    await bot._poll_welcome_joins()
+    assert bot.client.sent_messages == []
+
+
+@pytest.mark.asyncio
+async def test_admin_log_non_join_events_ignored(config, db, registry):
+    from telethon import types, utils
+
+    bot = make_selfbot_with_admin_log(config, db, registry)
+    chat_id = utils.get_peer_id(types.PeerChannel(123))
+    await db.set_welcome_message(chat_id, "hi [name]")
+    await db.set_welcome_enabled(chat_id, True)
+
+    await bot._poll_welcome_joins()
+
+    bot.client.admin_log_results.append(
+        make_admin_log_result(
+            [(8, 111, types.ChannelAdminLogEventActionParticipantLeave())],
+            [types.User(id=111, first_name="Ali")],
+        )
+    )
+    await bot._poll_welcome_joins()
+    assert bot.client.sent_messages == []
+
+
+@pytest.mark.asyncio
+async def test_admin_log_error_warns_once(config, db, registry, caplog):
+    """No admin rights → warn once, don't spam the log every 30s."""
+    import logging as _logging
+
+    from telethon import types, utils
+
+    bot = make_selfbot_with_admin_log(config, db, registry)
+    chat_id = utils.get_peer_id(types.PeerChannel(123))
+    await db.set_welcome_message(chat_id, "hi")
+    await db.set_welcome_enabled(chat_id, True)
+    bot.client.admin_log_error = RuntimeError("CHAT_ADMIN_REQUIRED")
+
+    with caplog.at_level(_logging.WARNING, logger="selfbot.bot"):
+        await bot._poll_welcome_joins()
+        await bot._poll_welcome_joins()
+
+    warnings = [r for r in caplog.records if "admin log" in r.getMessage()]
+    assert len(warnings) == 1
+
+
+@pytest.mark.asyncio
+async def test_disabled_welcome_is_not_polled(config, db, registry):
+    from telethon import types, utils
+
+    bot = make_selfbot_with_admin_log(config, db, registry)
+    chat_id = utils.get_peer_id(types.PeerChannel(123))
+    await db.set_welcome_message(chat_id, "hi")  # saved but off
+
+    await bot._poll_welcome_joins()
+    assert bot.client.admin_log_requests == []
+
+
+@pytest.mark.asyncio
+async def test_legacy_small_groups_are_not_polled(config, db, registry):
+    """Basic groups have no admin log; the poller must skip them quietly."""
+    bot = make_selfbot_with_admin_log(config, db, registry)
+    await db.set_welcome_message(-1234, "hi")  # PeerChat-style id
+    await db.set_welcome_enabled(-1234, True)
+
+    await bot._poll_welcome_joins()
+    assert bot.client.admin_log_requests == []
+
+
+# ---------------------------------------------------------------------------
 # Database layer
 # ---------------------------------------------------------------------------
 
