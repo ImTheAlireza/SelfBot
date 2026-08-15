@@ -17,7 +17,7 @@ from collections.abc import Awaitable
 from datetime import datetime, timezone
 from typing import Any
 
-from telethon import TelegramClient, events, functions, types
+from telethon import TelegramClient, events, functions, types, utils
 from telethon.errors import FloodWaitError, MessageNotModifiedError
 
 from .config import Config
@@ -35,6 +35,8 @@ logger = logging.getLogger(__name__)
 __all__ = ["SelfBot"]
 
 _REACTION_CACHE_TTL = 300.0
+_WELCOME_DEDUP_TTL = 300.0
+_WELCOME_POLL_INTERVAL = 30.0
 
 
 class SelfBot:
@@ -76,6 +78,9 @@ class SelfBot:
         self._auto_reply_cache: dict[int, list[Any]] = {}
         self._reaction_cache: dict[str, str] = {}
         self._reaction_cache_at = 0.0
+        self._recent_welcomes: dict[tuple[int, int], float] = {}
+        self._welcome_log_ids: dict[int, int] = {}
+        self._welcome_poll_warned: set[int] = set()
         self._telegram_log_handler: TelegramLogHandler | None = None
         self._background: set[asyncio.Task[Any]] = set()
         self._shutting_down = False
@@ -138,6 +143,7 @@ class SelfBot:
         self._attach_telegram_logging()
         restored, expired = await self._restore_timers()
         self._spawn(self._janitor(), name="janitor")
+        self._spawn(self._welcome_watcher(), name="welcome-watcher")
 
         logger.info("Ready — %d commands registered", len(self.registry))
         await self._announce_online(restored, expired)
@@ -303,6 +309,29 @@ class SelfBot:
     def _register_events(self) -> None:
         self.client.add_event_handler(self._on_new_message, events.NewMessage())
         self.client.add_event_handler(self._on_message_edited, events.MessageEdited())
+        self.client.add_event_handler(self._on_chat_action, events.ChatAction())
+        # Telethon's ChatAction does not cover "join request approved" service
+        # messages (MessageActionChatJoinedByRequest), so catch those raw.
+        self.client.add_event_handler(
+            self._on_raw_update,
+            events.Raw((types.UpdateNewMessage, types.UpdateNewChannelMessage)),
+        )
+
+    async def _on_chat_action(self, event: Any) -> None:
+        try:
+            await self._maybe_welcome(event)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Unhandled error while processing chat action")
+
+    async def _on_raw_update(self, update: Any) -> None:
+        try:
+            await self._maybe_welcome_join_request(update)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Unhandled error while processing raw update")
 
     async def _on_new_message(self, event: Any) -> None:
         try:
@@ -505,6 +534,281 @@ class SelfBot:
             logger.warning("Rate limited while reacting; pausing %ss", exc.seconds)
         except Exception as exc:
             logger.debug("Reaction failed in @%s: %s", username, exc)
+
+    async def _maybe_welcome(self, event: Any) -> None:
+        """Greet users who join or are added, when this chat has welcome on."""
+        if not self.active:
+            return
+        if not (getattr(event, "user_joined", False) or getattr(event, "user_added", False)):
+            return
+
+        chat_id = getattr(event, "chat_id", None)
+        if chat_id is None:
+            return
+
+        welcome = await self._enabled_welcome(chat_id)
+        if welcome is None:
+            return
+
+        try:
+            users = await event.get_users()
+        except Exception:
+            logger.debug("Could not resolve joining users in chat %s", chat_id, exc_info=True)
+            users = []
+        if not users:
+            return
+
+        await self._welcome_users(welcome, chat_id, users, reply_event=event)
+
+    async def _maybe_welcome_join_request(self, update: Any) -> None:
+        """Greet users whose join request was approved.
+
+        Telethon's ``ChatAction`` event does not recognise the
+        ``MessageActionChatJoinedByRequest`` service message, so approvals
+        arrive here through a raw update instead.
+        """
+        if not self.active:
+            return
+
+        message = getattr(update, "message", None)
+        if not isinstance(message, types.MessageService):
+            return
+        if not isinstance(message.action, types.MessageActionChatJoinedByRequest):
+            return
+        if message.from_id is None:
+            return
+
+        chat_id = utils.get_peer_id(message.peer_id)
+        welcome = await self._enabled_welcome(chat_id)
+        if welcome is None:
+            return
+
+        user_id = utils.get_peer_id(message.from_id)
+        user = await self._resolve_user(update, chat_id, user_id, message.id)
+        if user is None:
+            logger.warning(
+                "Welcome: could not resolve approved user %s in chat %s", user_id, chat_id
+            )
+            return
+
+        logger.info("Welcome: join request approved by user %s in chat %s", user_id, chat_id)
+        await self._welcome_users(
+            welcome, chat_id, [user], reply_to_msg_id=getattr(message, "id", None)
+        )
+
+    async def _resolve_user(
+        self, update: Any, chat_id: int, user_id: int, msg_id: int | None
+    ) -> Any:
+        """Resolve a user id into a full User, trying the cheapest source first.
+
+        A user who just joined is usually *not* in the session's entity cache
+        yet, so ``get_entity(int)`` alone tends to fail with "could not find
+        the input entity". The raw update however carries the user object in
+        ``_entities``, and the service message can be re-fetched with entities
+        as a last resort.
+        """
+        # 1. Users delivered alongside the raw update.
+        entities = getattr(update, "_entities", None) or {}
+        user = entities.get(user_id)
+        if isinstance(user, types.User):
+            return user
+
+        # 2. The session's entity cache.
+        try:
+            return await self.client.get_entity(user_id)
+        except Exception:
+            logger.debug("get_entity(%s) failed", user_id, exc_info=True)
+
+        # 3. Re-fetch the service message; the response includes its sender.
+        if msg_id is not None:
+            try:
+                msg = await self.client.get_messages(chat_id, ids=msg_id)
+                if msg is not None:
+                    sender = await msg.get_sender()
+                    if sender is not None:
+                        return sender
+            except Exception:
+                logger.debug("Refetching message %s failed", msg_id, exc_info=True)
+        return None
+
+    async def _welcome_watcher(self) -> None:
+        """Poll the admin log of welcome-enabled channels for fresh joins.
+
+        Realtime detection relies on the join service message, which a
+        cleaner bot can delete (or the group can hide) before we act on it.
+        User accounts do not receive ``UpdateChannelParticipant`` — that
+        update is bot-only — but an *admin* account can read the channel's
+        admin log, which records every join and join-request approval. The
+        dedup guard keeps this from double-greeting users the realtime path
+        already handled.
+        """
+        while True:
+            try:
+                await asyncio.sleep(_WELCOME_POLL_INTERVAL)
+                if not self.active:
+                    continue
+                await self._poll_welcome_joins()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("Welcome watcher pass failed", exc_info=True)
+
+    async def _poll_welcome_joins(self) -> None:
+        try:
+            welcomes = await self.db.list_welcomes()
+        except Exception:
+            logger.debug("Could not list welcomes", exc_info=True)
+            return
+
+        for welcome in welcomes:
+            if not welcome.enabled:
+                self._welcome_log_ids.pop(welcome.chat_id, None)
+                continue
+            real_id, peer_type = utils.resolve_id(welcome.chat_id)
+            if peer_type is not types.PeerChannel:
+                continue  # legacy small groups have no admin log
+            await self._poll_one_admin_log(welcome, real_id)
+
+    async def _poll_one_admin_log(self, welcome: Any, channel_id: int) -> None:
+        chat_id = welcome.chat_id
+        last_seen = self._welcome_log_ids.get(chat_id)
+        try:
+            result = await self.client(
+                functions.channels.GetAdminLogRequest(
+                    channel=channel_id,
+                    q="",
+                    max_id=0,
+                    min_id=last_seen or 0,
+                    limit=20 if last_seen else 1,
+                    events_filter=types.ChannelAdminLogEventsFilter(join=True, invite=True),
+                )
+            )
+        except FloodWaitError as exc:
+            logger.debug("Admin log flood wait %ss for chat %s", exc.seconds, chat_id)
+            return
+        except Exception as exc:
+            if chat_id not in self._welcome_poll_warned:
+                self._welcome_poll_warned.add(chat_id)
+                logger.warning(
+                    "Welcome: cannot read the admin log of chat %s (%s: %s); "
+                    "join detection there relies on service messages only",
+                    chat_id,
+                    type(exc).__name__,
+                    exc,
+                )
+            return
+
+        self._welcome_poll_warned.discard(chat_id)
+        events_list = list(getattr(result, "events", []) or [])
+        if events_list:
+            self._welcome_log_ids[chat_id] = max(e.id for e in events_list)
+        elif last_seen is None:
+            self._welcome_log_ids[chat_id] = 0
+
+        if last_seen is None:
+            return  # first pass only records the position; no back-greeting
+
+        users_by_id = {u.id: u for u in getattr(result, "users", []) or []}
+        join_actions = (
+            types.ChannelAdminLogEventActionParticipantJoin,
+            types.ChannelAdminLogEventActionParticipantJoinByInvite,
+            types.ChannelAdminLogEventActionParticipantJoinByRequest,
+        )
+        joined: list[Any] = []
+        for log_event in sorted(events_list, key=lambda e: e.id):
+            if not isinstance(log_event.action, join_actions):
+                continue
+            user = users_by_id.get(log_event.user_id)
+            if user is None:
+                try:
+                    user = await self.client.get_entity(log_event.user_id)
+                except Exception:
+                    logger.debug(
+                        "Could not resolve joiner %s from admin log", log_event.user_id,
+                        exc_info=True,
+                    )
+                    continue
+            joined.append(user)
+
+        if joined:
+            logger.info(
+                "Welcome: %d join(s) found in the admin log of chat %s",
+                len(joined),
+                chat_id,
+            )
+            await self._welcome_users(welcome, chat_id, joined)
+
+    async def _enabled_welcome(self, chat_id: int) -> Any:
+        """The chat's welcome row when it exists and is switched on, else None."""
+        try:
+            welcome = await self.db.get_welcome(chat_id)
+        except Exception:
+            logger.debug("Could not load welcome for chat %s", chat_id, exc_info=True)
+            return None
+        if welcome is None or not welcome.enabled:
+            return None
+        return welcome
+
+    def _already_welcomed(self, chat_id: int, user_id: int | None) -> bool:
+        """Dedup guard: the same join can surface through more than one update."""
+        if user_id is None:
+            return False
+        now = time.monotonic()
+        self._recent_welcomes = {
+            key: at
+            for key, at in self._recent_welcomes.items()
+            if now - at < _WELCOME_DEDUP_TTL
+        }
+        key = (chat_id, user_id)
+        if key in self._recent_welcomes:
+            return True
+        self._recent_welcomes[key] = now
+        return False
+
+    async def _welcome_users(
+        self,
+        welcome: Any,
+        chat_id: int,
+        users: list[Any],
+        *,
+        reply_event: Any = None,
+        reply_to_msg_id: int | None = None,
+    ) -> None:
+        """Render and deliver the welcome to each arriving user."""
+        from .plugins.welcome import render_welcome
+
+        my_id = getattr(self.me, "id", None)
+        for user in users:
+            if getattr(user, "bot", False):
+                continue
+            user_id = getattr(user, "id", None)
+            if my_id is not None and user_id == my_id:
+                continue  # don't welcome ourselves when we (re)join
+            if self._already_welcomed(chat_id, user_id):
+                continue
+
+            text = render_welcome(welcome.message, user)
+            try:
+                # Prefer replying to the join service message; fall back to a
+                # plain message when that is not possible.
+                try:
+                    if reply_event is not None:
+                        await reply_event.reply(text)
+                    else:
+                        await self.client.send_message(
+                            chat_id, text, reply_to=reply_to_msg_id
+                        )
+                except Exception:
+                    if reply_event is None and reply_to_msg_id is None:
+                        raise
+                    await self.client.send_message(chat_id, text)
+                logger.debug("Welcomed user %s in chat %s", user_id, chat_id)
+            except FloodWaitError as exc:
+                logger.warning("Rate limited while welcoming; pausing %ss", exc.seconds)
+                return
+            except Exception as exc:
+                logger.warning("Could not welcome user in chat %s: %s", chat_id, exc)
+                return
 
     def invalidate_auto_reply_cache(self, chat_id: int | None = None) -> None:
         if chat_id is None:

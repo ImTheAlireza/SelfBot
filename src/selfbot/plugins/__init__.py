@@ -25,6 +25,7 @@ PRELUDE = (
     "timers",
     "utilities",
     "reactions",
+    "welcome",
     "stickers",
 )
 
