@@ -172,7 +172,7 @@ Durations: `90`, `15:30`, `1:15:30`, `2:12:15:30`, or `1h30m`.
 |---|---|
 | `setautoreply <contain\|match> "input" "reply"` | 👑 Auto-reply in the current chat only (`contain` is whole-word aware) |
 | `remautoreply <contain\|match> "input"` / `autoreplylist` | 👑 Manage per-chat auto-replies |
-| `selfwlc <set\|on\|off\|list\|clear> [-all]` | 👑 Welcome new members with a saved per-chat message (`[name]`, `[nametag]`, `[username]`, `[[username]/[nametag]]` tags; Persian supported) |
+| `selfwlc <set\|on\|off\|list\|clear> [-all]` | 👑 Welcome new members with a saved per-chat message (`[name]`, `[nametag]`, `[username]` and `[[username]/[nametag]]` tags; Persian supported) |
 | `setreact <@channel> <emoji>` | 👑 Auto-react to new posts |
 | `remreact <@channel>` / `reactlist` | 👑 Manage auto-reactions |
 | `stick [-save] <text>` | Render text to a sticker |

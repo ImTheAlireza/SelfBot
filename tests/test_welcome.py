@@ -40,10 +40,10 @@ def test_username_tag():
     assert render_welcome("yo [username]", user) == "yo @alireza"
 
 
-def test_username_tag_falls_back_to_mention():
-    """A user with no @username still gets greeted, via a mention."""
+def test_username_tag_is_empty_without_username():
+    """Plain [username] does not fall back — that is the combined tag's job."""
     user = FakeUser(id=777, first_name="Sara", username=None)
-    assert render_welcome("yo [username]", user) == "yo [Sara](tg://user?id=777)"
+    assert render_welcome("yo [username]", user) == "yo "
 
 
 def test_combined_tag_prefers_username():

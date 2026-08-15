@@ -8,7 +8,7 @@ user's profile:
 
 * ``[name]`` — profile name (first + last)
 * ``[nametag]`` — profile name as a clickable mention
-* ``[username]`` — ``@username`` (falls back to a mention when absent)
+* ``[username]`` — ``@username`` (empty when the user has none)
 * ``[[username]/[nametag]]`` — ``@username`` when set, otherwise a mention
 
 Persian (and any other Unicode) text works throughout.
@@ -61,12 +61,12 @@ def render_welcome(template: str, user: Any) -> str:
     username = getattr(user, "username", None)
 
     nametag = f"[{name}](tg://user?id={user_id})" if user_id else name
-    username_text = f"@{username}" if username else nametag
+    username_text = f"@{username}" if username else ""
 
     text = template
     # Longest tag first, so `[[username]/[nametag]]` is not shredded by the
     # `[username]` / `[nametag]` replacements below.
-    text = text.replace(COMBINED_TAG, username_text)
+    text = text.replace(COMBINED_TAG, username_text or nametag)
     text = text.replace("[nametag]", nametag)
     text = text.replace("[username]", username_text)
     text = text.replace("[name]", name)
