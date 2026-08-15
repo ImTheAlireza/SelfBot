@@ -303,6 +303,15 @@ class SelfBot:
     def _register_events(self) -> None:
         self.client.add_event_handler(self._on_new_message, events.NewMessage())
         self.client.add_event_handler(self._on_message_edited, events.MessageEdited())
+        self.client.add_event_handler(self._on_chat_action, events.ChatAction())
+
+    async def _on_chat_action(self, event: Any) -> None:
+        try:
+            await self._maybe_welcome(event)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Unhandled error while processing chat action")
 
     async def _on_new_message(self, event: Any) -> None:
         try:
@@ -505,6 +514,58 @@ class SelfBot:
             logger.warning("Rate limited while reacting; pausing %ss", exc.seconds)
         except Exception as exc:
             logger.debug("Reaction failed in @%s: %s", username, exc)
+
+    async def _maybe_welcome(self, event: Any) -> None:
+        """Greet users who join or are added, when this chat has welcome on."""
+        if not self.active:
+            return
+        if not (getattr(event, "user_joined", False) or getattr(event, "user_added", False)):
+            return
+
+        chat_id = getattr(event, "chat_id", None)
+        if chat_id is None:
+            return
+
+        try:
+            welcome = await self.db.get_welcome(chat_id)
+        except Exception:
+            logger.debug("Could not load welcome for chat %s", chat_id, exc_info=True)
+            return
+        if welcome is None or not welcome.enabled:
+            return
+
+        try:
+            users = await event.get_users()
+        except Exception:
+            logger.debug("Could not resolve joining users in chat %s", chat_id, exc_info=True)
+            users = []
+        if not users:
+            return
+
+        from .plugins.welcome import render_welcome
+
+        my_id = getattr(self.me, "id", None)
+        for user in users:
+            if getattr(user, "bot", False):
+                continue
+            if my_id is not None and getattr(user, "id", None) == my_id:
+                continue  # don't welcome ourselves when we (re)join
+
+            text = render_welcome(welcome.message, user)
+            try:
+                # Prefer replying to the join service message; fall back to a
+                # plain message when that is not possible.
+                try:
+                    await event.reply(text)
+                except Exception:
+                    await self.client.send_message(chat_id, text)
+                logger.debug("Welcomed user %s in chat %s", getattr(user, "id", "?"), chat_id)
+            except FloodWaitError as exc:
+                logger.warning("Rate limited while welcoming; pausing %ss", exc.seconds)
+                return
+            except Exception as exc:
+                logger.warning("Could not welcome user in chat %s: %s", chat_id, exc)
+                return
 
     def invalidate_auto_reply_cache(self, chat_id: int | None = None) -> None:
         if chat_id is None:

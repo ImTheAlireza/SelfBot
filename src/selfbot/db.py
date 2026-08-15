@@ -30,6 +30,7 @@ __all__ = [
     "QuickReply",
     "StickerPack",
     "Timer",
+    "Welcome",
     "utcnow",
 ]
 
@@ -118,6 +119,16 @@ class AutoReply:
     trigger: str
     reply_text: str
     reply_condition: str = "any"  # "any" | "nr" | "sr"
+    created_at: datetime | None = None
+
+
+@dataclass(slots=True)
+class Welcome:
+    """A per-chat welcome message template."""
+
+    chat_id: int
+    message: str
+    enabled: bool = False
     created_at: datetime | None = None
 
 
@@ -353,6 +364,14 @@ class Database:
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )
                 """,
+                """
+                CREATE TABLE IF NOT EXISTS welcomes (
+                    chat_id INTEGER PRIMARY KEY,
+                    message TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+                """,
                 "CREATE INDEX IF NOT EXISTS idx_timers_active ON timers (is_active, end_time)",
                 "CREATE INDEX IF NOT EXISTS idx_timers_user ON timers (user_id)",
             ]
@@ -413,6 +432,14 @@ class Database:
                     name VARCHAR(64) PRIMARY KEY,
                     title VARCHAR(255) NOT NULL,
                     owner_id BIGINT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                ) {charset}
+                """,
+                f"""
+                CREATE TABLE IF NOT EXISTS welcomes (
+                    chat_id BIGINT PRIMARY KEY,
+                    message TEXT NOT NULL,
+                    enabled BOOLEAN NOT NULL DEFAULT FALSE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 ) {charset}
                 """,
@@ -605,6 +632,73 @@ class Database:
             rules,
             key=lambda rule: (rule.mode != "match", -len(rule.trigger), rule.trigger.casefold()),
         )
+
+    # -- welcomes ----------------------------------------------------------
+
+    async def set_welcome_message(self, chat_id: int, message: str) -> None:
+        """Save (or replace) the welcome template for a chat.
+
+        Keeps the enabled flag as-is when a row already exists, so updating
+        the text of an active welcome does not silently switch it off.
+        """
+        exists = await self.fetch_one(
+            "SELECT chat_id FROM welcomes WHERE chat_id = %s", (chat_id,)
+        )
+        if exists:
+            await self.execute(
+                "UPDATE welcomes SET message = %s WHERE chat_id = %s",
+                (message, chat_id),
+            )
+        else:
+            await self.execute(
+                "INSERT INTO welcomes (chat_id, message, enabled) VALUES (%s, %s, 0)",
+                (chat_id, message),
+            )
+
+    async def get_welcome(self, chat_id: int) -> Welcome | None:
+        row = await self.fetch_one(
+            "SELECT chat_id, message, enabled, created_at FROM welcomes WHERE chat_id = %s",
+            (chat_id,),
+        )
+        if not row:
+            return None
+        return Welcome(
+            chat_id=int(row["chat_id"]),
+            message=row["message"],
+            enabled=bool(row["enabled"]),
+            created_at=_as_aware(row.get("created_at")),
+        )
+
+    async def set_welcome_enabled(self, chat_id: int, enabled: bool) -> int:
+        """Toggle a chat's welcome. Returns affected rows (0 = no template saved)."""
+        return await self.execute(
+            "UPDATE welcomes SET enabled = %s WHERE chat_id = %s",
+            (1 if enabled else 0, chat_id),
+        )
+
+    async def disable_all_welcomes(self) -> int:
+        """Switch every welcome off (templates stay saved)."""
+        return await self.execute("UPDATE welcomes SET enabled = 0 WHERE enabled = 1")
+
+    async def delete_welcome(self, chat_id: int) -> int:
+        return await self.execute("DELETE FROM welcomes WHERE chat_id = %s", (chat_id,))
+
+    async def delete_all_welcomes(self) -> int:
+        return await self.execute("DELETE FROM welcomes")
+
+    async def list_welcomes(self) -> list[Welcome]:
+        rows = await self.fetch_all(
+            "SELECT chat_id, message, enabled, created_at FROM welcomes ORDER BY chat_id"
+        )
+        return [
+            Welcome(
+                chat_id=int(row["chat_id"]),
+                message=row["message"],
+                enabled=bool(row["enabled"]),
+                created_at=_as_aware(row.get("created_at")),
+            )
+            for row in rows
+        ]
 
     # -- reactions ---------------------------------------------------------
 

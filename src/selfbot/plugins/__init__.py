@@ -17,7 +17,16 @@ logger = logging.getLogger(__name__)
 __all__ = ["load_all"]
 
 #: Modules loaded in this order so `help` categories read sensibly.
-PRELUDE = ("core", "messaging", "files", "timers", "utilities", "reactions", "stickers")
+PRELUDE = (
+    "core",
+    "messaging",
+    "files",
+    "timers",
+    "utilities",
+    "reactions",
+    "welcome",
+    "stickers",
+)
 
 
 def load_all() -> list[str]:
