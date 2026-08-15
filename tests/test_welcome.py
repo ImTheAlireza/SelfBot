@@ -415,6 +415,119 @@ async def test_non_join_actions_are_ignored(config, db, registry):
 
 
 # ---------------------------------------------------------------------------
+# Approved join requests
+# ---------------------------------------------------------------------------
+
+
+def make_join_request_update(chat: Any, user_id: int, msg_id: int = 42) -> Any:
+    from telethon import types
+
+    message = types.MessageService(
+        id=msg_id,
+        peer_id=chat,
+        from_id=types.PeerUser(user_id),
+        action=types.MessageActionChatJoinedByRequest(),
+    )
+    return types.UpdateNewChannelMessage(message=message, pts=1, pts_count=1)
+
+
+@pytest.mark.asyncio
+async def test_welcomes_approved_join_request(config, db, registry):
+    from telethon import types, utils
+
+    bot = make_selfbot(config, db, registry)
+    chat = types.PeerChannel(123)
+    chat_id = utils.get_peer_id(chat)  # -100 prefixed
+
+    await db.set_welcome_message(chat_id, "سلام [name] خوش اومدی")
+    await db.set_welcome_enabled(chat_id, True)
+    bot.client.entities[111] = FakeUser(id=111, first_name="علی")
+
+    await bot._maybe_welcome_join_request(make_join_request_update(chat, 111))
+
+    assert bot.client.sent_messages == [(chat_id, "سلام علی خوش اومدی")]
+
+
+@pytest.mark.asyncio
+async def test_approved_request_in_disabled_chat_is_ignored(config, db, registry):
+    from telethon import types, utils
+
+    bot = make_selfbot(config, db, registry)
+    chat = types.PeerChannel(123)
+    chat_id = utils.get_peer_id(chat)
+
+    await db.set_welcome_message(chat_id, "hi [name]")  # saved but off
+    bot.client.entities[111] = FakeUser(id=111)
+
+    await bot._maybe_welcome_join_request(make_join_request_update(chat, 111))
+
+    assert bot.client.sent_messages == []
+
+
+@pytest.mark.asyncio
+async def test_non_join_service_messages_are_ignored(config, db, registry):
+    from telethon import types, utils
+
+    bot = make_selfbot(config, db, registry)
+    chat = types.PeerChannel(123)
+    chat_id = utils.get_peer_id(chat)
+    await db.set_welcome_message(chat_id, "hi [name]")
+    await db.set_welcome_enabled(chat_id, True)
+
+    message = types.MessageService(
+        id=1,
+        peer_id=chat,
+        from_id=types.PeerUser(111),
+        action=types.MessageActionPinMessage(),
+    )
+    update = types.UpdateNewChannelMessage(message=message, pts=1, pts_count=1)
+    await bot._maybe_welcome_join_request(update)
+
+    assert bot.client.sent_messages == []
+
+
+@pytest.mark.asyncio
+async def test_same_join_is_not_welcomed_twice(config, db, registry):
+    """If both the ChatAction and the raw path fire, greet only once."""
+    from telethon import types, utils
+
+    bot = make_selfbot(config, db, registry)
+    chat = types.PeerChannel(123)
+    chat_id = utils.get_peer_id(chat)
+
+    await db.set_welcome_message(chat_id, "hi [name]")
+    await db.set_welcome_enabled(chat_id, True)
+    bot.client.entities[111] = FakeUser(id=111, first_name="Ali")
+
+    update = make_join_request_update(chat, 111)
+    await bot._maybe_welcome_join_request(update)
+    await bot._maybe_welcome_join_request(update)
+
+    event = FakeActionEvent(chat_id=chat_id, users=[FakeUser(id=111, first_name="Ali")])
+    await bot._maybe_welcome(event)
+
+    assert bot.client.sent_messages == [(chat_id, "hi Ali")]
+    assert event.replies == []
+
+
+@pytest.mark.asyncio
+async def test_paused_bot_ignores_join_requests(config, db, registry):
+    from telethon import types, utils
+
+    bot = make_selfbot(config, db, registry)
+    chat = types.PeerChannel(123)
+    chat_id = utils.get_peer_id(chat)
+    await db.set_welcome_message(chat_id, "hi [name]")
+    await db.set_welcome_enabled(chat_id, True)
+    bot.client.entities[111] = FakeUser(id=111)
+    bot.active = False
+
+    await bot._maybe_welcome_join_request(make_join_request_update(chat, 111))
+
+    assert bot.client.sent_messages == []
+
+
+# ---------------------------------------------------------------------------
 # Database layer
 # ---------------------------------------------------------------------------
 

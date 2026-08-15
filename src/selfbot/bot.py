@@ -17,7 +17,7 @@ from collections.abc import Awaitable
 from datetime import datetime, timezone
 from typing import Any
 
-from telethon import TelegramClient, events, functions, types
+from telethon import TelegramClient, events, functions, types, utils
 from telethon.errors import FloodWaitError, MessageNotModifiedError
 
 from .config import Config
@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 __all__ = ["SelfBot"]
 
 _REACTION_CACHE_TTL = 300.0
+_WELCOME_DEDUP_TTL = 300.0
 
 
 class SelfBot:
@@ -76,6 +77,7 @@ class SelfBot:
         self._auto_reply_cache: dict[int, list[Any]] = {}
         self._reaction_cache: dict[str, str] = {}
         self._reaction_cache_at = 0.0
+        self._recent_welcomes: dict[tuple[int, int], float] = {}
         self._telegram_log_handler: TelegramLogHandler | None = None
         self._background: set[asyncio.Task[Any]] = set()
         self._shutting_down = False
@@ -304,6 +306,12 @@ class SelfBot:
         self.client.add_event_handler(self._on_new_message, events.NewMessage())
         self.client.add_event_handler(self._on_message_edited, events.MessageEdited())
         self.client.add_event_handler(self._on_chat_action, events.ChatAction())
+        # Telethon's ChatAction does not cover "join request approved" service
+        # messages (MessageActionChatJoinedByRequest), so catch those raw.
+        self.client.add_event_handler(
+            self._on_raw_update,
+            events.Raw((types.UpdateNewMessage, types.UpdateNewChannelMessage)),
+        )
 
     async def _on_chat_action(self, event: Any) -> None:
         try:
@@ -312,6 +320,14 @@ class SelfBot:
             raise
         except Exception:
             logger.exception("Unhandled error while processing chat action")
+
+    async def _on_raw_update(self, update: Any) -> None:
+        try:
+            await self._maybe_welcome_join_request(update)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Unhandled error while processing raw update")
 
     async def _on_new_message(self, event: Any) -> None:
         try:
@@ -526,12 +542,8 @@ class SelfBot:
         if chat_id is None:
             return
 
-        try:
-            welcome = await self.db.get_welcome(chat_id)
-        except Exception:
-            logger.debug("Could not load welcome for chat %s", chat_id, exc_info=True)
-            return
-        if welcome is None or not welcome.enabled:
+        welcome = await self._enabled_welcome(chat_id)
+        if welcome is None:
             return
 
         try:
@@ -542,24 +554,109 @@ class SelfBot:
         if not users:
             return
 
+        await self._welcome_users(welcome, chat_id, users, reply_event=event)
+
+    async def _maybe_welcome_join_request(self, update: Any) -> None:
+        """Greet users whose join request was approved.
+
+        Telethon's ``ChatAction`` event does not recognise the
+        ``MessageActionChatJoinedByRequest`` service message, so approvals
+        arrive here through a raw update instead.
+        """
+        if not self.active:
+            return
+
+        message = getattr(update, "message", None)
+        if not isinstance(message, types.MessageService):
+            return
+        if not isinstance(message.action, types.MessageActionChatJoinedByRequest):
+            return
+        if message.from_id is None:
+            return
+
+        chat_id = utils.get_peer_id(message.peer_id)
+        welcome = await self._enabled_welcome(chat_id)
+        if welcome is None:
+            return
+
+        user_id = utils.get_peer_id(message.from_id)
+        try:
+            user = await self.client.get_entity(user_id)
+        except Exception:
+            logger.debug(
+                "Could not resolve approved user %s in chat %s", user_id, chat_id, exc_info=True
+            )
+            return
+
+        await self._welcome_users(
+            welcome, chat_id, [user], reply_to_msg_id=getattr(message, "id", None)
+        )
+
+    async def _enabled_welcome(self, chat_id: int) -> Any:
+        """The chat's welcome row when it exists and is switched on, else None."""
+        try:
+            welcome = await self.db.get_welcome(chat_id)
+        except Exception:
+            logger.debug("Could not load welcome for chat %s", chat_id, exc_info=True)
+            return None
+        if welcome is None or not welcome.enabled:
+            return None
+        return welcome
+
+    def _already_welcomed(self, chat_id: int, user_id: int | None) -> bool:
+        """Dedup guard: the same join can surface through more than one update."""
+        if user_id is None:
+            return False
+        now = time.monotonic()
+        self._recent_welcomes = {
+            key: at
+            for key, at in self._recent_welcomes.items()
+            if now - at < _WELCOME_DEDUP_TTL
+        }
+        key = (chat_id, user_id)
+        if key in self._recent_welcomes:
+            return True
+        self._recent_welcomes[key] = now
+        return False
+
+    async def _welcome_users(
+        self,
+        welcome: Any,
+        chat_id: int,
+        users: list[Any],
+        *,
+        reply_event: Any = None,
+        reply_to_msg_id: int | None = None,
+    ) -> None:
+        """Render and deliver the welcome to each arriving user."""
         from .plugins.welcome import render_welcome
 
         my_id = getattr(self.me, "id", None)
         for user in users:
             if getattr(user, "bot", False):
                 continue
-            if my_id is not None and getattr(user, "id", None) == my_id:
+            user_id = getattr(user, "id", None)
+            if my_id is not None and user_id == my_id:
                 continue  # don't welcome ourselves when we (re)join
+            if self._already_welcomed(chat_id, user_id):
+                continue
 
             text = render_welcome(welcome.message, user)
             try:
                 # Prefer replying to the join service message; fall back to a
                 # plain message when that is not possible.
                 try:
-                    await event.reply(text)
+                    if reply_event is not None:
+                        await reply_event.reply(text)
+                    else:
+                        await self.client.send_message(
+                            chat_id, text, reply_to=reply_to_msg_id
+                        )
                 except Exception:
+                    if reply_event is None and reply_to_msg_id is None:
+                        raise
                     await self.client.send_message(chat_id, text)
-                logger.debug("Welcomed user %s in chat %s", getattr(user, "id", "?"), chat_id)
+                logger.debug("Welcomed user %s in chat %s", user_id, chat_id)
             except FloodWaitError as exc:
                 logger.warning("Rate limited while welcoming; pausing %ss", exc.seconds)
                 return
