@@ -1,10 +1,11 @@
-"""Messaging tools: spam, purge, user info and quick replies."""
+"""Messaging tools: spam, message deletion, user info and quick replies."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import time
+from io import BytesIO
 
 from telethon.errors import ChatWriteForbiddenError, FloodWaitError
 from telethon.tl.functions.users import GetFullUserRequest
@@ -17,8 +18,8 @@ logger = logging.getLogger(__name__)
 
 CATEGORY = "Messaging"
 
-#: Message predicates for `purge`. Keys are what the user types.
-PURGE_TYPES: dict[str, str] = {
+#: Message predicates for `del`. Keys are what the user types.
+DELETE_TYPES: dict[str, str] = {
     "photos": "photo",
     "videos": "video",
     "voices": "voice",
@@ -114,27 +115,32 @@ async def cmd_cancel(ctx: Context) -> None:
 
 
 @command(
-    "purge",
+    "del",
     category=CATEGORY,
     sudo_only=True,
     min_args=1,
-    aliases=("del",),
-    usage="purge <count|type> [--all-users]",
-    examples=("purge 10", "purge photos", "purge all"),
+    max_args=2,
+    usage="del <count|type> [-me]",
+    examples=("del 10", "del 400 -me", "del photos -me", "del all"),
 )
-async def cmd_purge(ctx: Context) -> None:
-    """Delete your recent messages by count or media type.
+async def cmd_del(ctx: Context) -> None:
+    """Delete messages in this chat; append `-me` to target only yours.
 
-    Only your own messages are removed unless `--all-users` is passed, which
-    requires delete permission in the chat.
+    The chat is always taken from the command event. No argument can select or
+    affect another chat.
     """
-    args = [a for a in ctx.args if a != "--all-users"]
-    own_only = "--all-users" not in ctx.args
-    if not args:
-        raise UsageError("Usage: `purge <count|type>`")
+    lowered = [arg.lower() for arg in ctx.args]
+    if "-me" in lowered[:-1] or lowered.count("-me") > 1:
+        raise UsageError("`-me` must be the final argument: `del <count|type> -me`")
+
+    own_only = bool(lowered and lowered[-1] == "-me")
+    args = ctx.args[:-1] if own_only else ctx.args
+    if len(args) != 1:
+        raise UsageError("Usage: `del <count|type> [-me]`")
 
     target = args[0].lower()
-    from_user = "me" if own_only else None
+    limit: int | None
+    kind: str
 
     if target.isdigit():
         count = int(target)
@@ -142,55 +148,99 @@ async def cmd_purge(ctx: Context) -> None:
             raise ValidationError("Count must be at least 1.")
         if count > 1000:
             raise ValidationError("Refusing to delete more than 1000 messages at once.")
-        if count > 10 and not await ctx.bot.confirm(
-            ctx.event, f"⚠️ Delete up to {count} messages?"
+
+        who = "of your messages" if own_only else "messages from everyone"
+        if (not own_only or count > 10) and not await ctx.bot.confirm(
+            ctx.event,
+            f"⚠️ Delete up to {count} {who} in this chat? This cannot be undone.",
         ):
             await ctx.reply("👍 Cancelled.")
             return
-        ids = [
-            msg.id
-            async for msg in ctx.client.iter_messages(
-                ctx.chat_id, limit=count, from_user=from_user
-            )
-        ]
+        limit = count
+        kind = "all"
 
-    elif target in PURGE_TYPES:
-        kind = PURGE_TYPES[target]
-        scope = "ALL messages" if kind == "all" else f"all `{target}`"
-        who = "from everyone" if not own_only else "of yours"
+    elif target in DELETE_TYPES:
+        kind = DELETE_TYPES[target]
+        scope = "all messages" if kind == "all" else f"all `{target}`"
+        who = "of yours" if own_only else "from everyone"
         if not await ctx.bot.confirm(
-            ctx.event, f"⚠️ Delete {scope} {who} in this chat? This cannot be undone."
+            ctx.event,
+            f"⚠️ Delete {scope} {who} in this chat? This cannot be undone.",
         ):
             await ctx.reply("👍 Cancelled.")
             return
+        # A type or `all` means the complete history of this chat, not an
+        # arbitrary global scan and not a fixed number of recent messages.
+        limit = None
 
-        ids = []
-        # Cap the scan so a huge chat cannot hang the bot indefinitely.
-        async for msg in ctx.client.iter_messages(
-            ctx.chat_id, limit=3000, from_user=from_user
-        ):
-            if kind == "all" or getattr(msg, kind, None):
-                ids.append(msg.id)
     else:
-        supported = ", ".join(f"`{k}`" for k in PURGE_TYPES)
+        supported = ", ".join(f"`{key}`" for key in DELETE_TYPES)
         raise ValidationError(f"Unknown type `{target}`.\nSupported: {supported}")
 
-    if not ids:
-        await ctx.reply("ℹ️ Nothing matched.")
+    matched, deleted = await _delete_matching_messages(
+        ctx,
+        limit=limit,
+        kind=kind,
+        own_only=own_only,
+    )
+    if not matched:
+        await ctx.reply("ℹ️ Nothing matched in this chat.")
         return
 
-    deleted = 0
-    for start in range(0, len(ids), 100):  # Telegram caps deletes at 100
-        batch = ids[start:start + 100]
-        try:
-            await ctx.client.delete_messages(ctx.chat_id, batch)
-            deleted += len(batch)
-        except FloodWaitError as exc:
-            await asyncio.sleep(min(exc.seconds + 1, 60))
-        except Exception as exc:
-            logger.warning("Delete batch failed: %s", exc)
+    await ctx.respond(f"🗑 Deleted **{deleted}** message(s) in this chat.")
 
-    await ctx.respond(f"🗑 Deleted **{deleted}** message(s).")
+
+async def _delete_matching_messages(
+    ctx: Context,
+    *,
+    limit: int | None,
+    kind: str,
+    own_only: bool,
+) -> tuple[int, int]:
+    """Scan only the current chat and delete matching messages in batches."""
+    matched = 0
+    deleted = 0
+    batch: list[int] = []
+    from_user = "me" if own_only else None
+
+    async for message in ctx.client.iter_messages(
+        ctx.chat_id,
+        limit=limit,
+        from_user=from_user,
+    ):
+        if kind != "all" and not getattr(message, kind, None):
+            continue
+        matched += 1
+        batch.append(message.id)
+        if len(batch) == 100:  # Telegram caps one delete request at 100 IDs.
+            deleted += await _delete_batch(ctx, batch)
+            batch = []
+
+    if batch:
+        deleted += await _delete_batch(ctx, batch)
+    return matched, deleted
+
+
+async def _delete_batch(ctx: Context, message_ids: list[int]) -> int:
+    """Delete one current-chat batch, retrying a single Telegram flood wait."""
+    for attempt in range(2):
+        try:
+            await ctx.client.delete_messages(ctx.chat_id, message_ids)
+            return len(message_ids)
+        except FloodWaitError as exc:
+            if attempt:
+                logger.warning(
+                    "Delete batch still rate-limited in chat %s; skipping",
+                    ctx.chat_id,
+                )
+                return 0
+            wait = min(exc.seconds + 1, 60)
+            logger.warning("Delete rate-limited; retrying in %ss", wait)
+            await asyncio.sleep(wait)
+        except Exception as exc:
+            logger.warning("Delete batch failed in chat %s: %s", ctx.chat_id, exc)
+            return 0
+    return 0
 
 
 @command(
@@ -251,7 +301,20 @@ async def cmd_info(ctx: Context) -> None:
 
     await status.delete()
     if photo:
-        await ctx.client.send_file(ctx.chat_id, photo, caption=caption)
+        # Raw bytes have no filename, so Telethon cannot infer an image MIME
+        # type and uploads them as an unnamed document. A named in-memory JPEG
+        # makes the profile picture render as a Telegram photo instead.
+        photo_file = BytesIO(photo)
+        photo_file.name = f"profile_{entity.id}.jpg"  # type: ignore[attr-defined]
+        try:
+            await ctx.client.send_file(
+                ctx.chat_id,
+                photo_file,
+                caption=caption,
+                force_document=False,
+            )
+        finally:
+            photo_file.close()
     else:
         await ctx.reply(caption)
 
