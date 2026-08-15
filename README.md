@@ -239,7 +239,7 @@ usage hint rather than a traceback.
 ```bash
 pip install -e ".[dev,full]"
 
-pytest                      # 283 tests
+pytest                      # 284 tests
 pytest --cov=selfbot        # with coverage
 ruff check src tests        # lint
 mypy src/selfbot            # type check

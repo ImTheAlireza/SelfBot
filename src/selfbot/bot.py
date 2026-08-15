@@ -580,17 +580,52 @@ class SelfBot:
             return
 
         user_id = utils.get_peer_id(message.from_id)
-        try:
-            user = await self.client.get_entity(user_id)
-        except Exception:
-            logger.debug(
-                "Could not resolve approved user %s in chat %s", user_id, chat_id, exc_info=True
+        user = await self._resolve_user(update, chat_id, user_id, message.id)
+        if user is None:
+            logger.warning(
+                "Welcome: could not resolve approved user %s in chat %s", user_id, chat_id
             )
             return
 
+        logger.info("Welcome: join request approved by user %s in chat %s", user_id, chat_id)
         await self._welcome_users(
             welcome, chat_id, [user], reply_to_msg_id=getattr(message, "id", None)
         )
+
+    async def _resolve_user(
+        self, update: Any, chat_id: int, user_id: int, msg_id: int | None
+    ) -> Any:
+        """Resolve a user id into a full User, trying the cheapest source first.
+
+        A user who just joined is usually *not* in the session's entity cache
+        yet, so ``get_entity(int)`` alone tends to fail with "could not find
+        the input entity". The raw update however carries the user object in
+        ``_entities``, and the service message can be re-fetched with entities
+        as a last resort.
+        """
+        # 1. Users delivered alongside the raw update.
+        entities = getattr(update, "_entities", None) or {}
+        user = entities.get(user_id)
+        if isinstance(user, types.User):
+            return user
+
+        # 2. The session's entity cache.
+        try:
+            return await self.client.get_entity(user_id)
+        except Exception:
+            logger.debug("get_entity(%s) failed", user_id, exc_info=True)
+
+        # 3. Re-fetch the service message; the response includes its sender.
+        if msg_id is not None:
+            try:
+                msg = await self.client.get_messages(chat_id, ids=msg_id)
+                if msg is not None:
+                    sender = await msg.get_sender()
+                    if sender is not None:
+                        return sender
+            except Exception:
+                logger.debug("Refetching message %s failed", msg_id, exc_info=True)
+        return None
 
     async def _enabled_welcome(self, chat_id: int) -> Any:
         """The chat's welcome row when it exists and is switched on, else None."""

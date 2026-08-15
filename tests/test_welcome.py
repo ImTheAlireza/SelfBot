@@ -449,6 +449,28 @@ async def test_welcomes_approved_join_request(config, db, registry):
 
 
 @pytest.mark.asyncio
+async def test_approved_user_resolved_from_update_entities(config, db, registry):
+    """The joining user is usually not in the session cache yet — the raw
+    update's bundled entities must be used before get_entity."""
+    from telethon import types, utils
+
+    bot = make_selfbot(config, db, registry)
+    chat = types.PeerChannel(123)
+    chat_id = utils.get_peer_id(chat)
+
+    await db.set_welcome_message(chat_id, "hi [name]")
+    await db.set_welcome_enabled(chat_id, True)
+    # get_entity would raise (user 111 NOT in bot.client.entities); the
+    # update carries the user object instead, like real Telethon updates do.
+    update = make_join_request_update(chat, 111)
+    update._entities = {111: types.User(id=111, first_name="Ali")}
+
+    await bot._maybe_welcome_join_request(update)
+
+    assert bot.client.sent_messages == [(chat_id, "hi Ali")]
+
+
+@pytest.mark.asyncio
 async def test_approved_request_in_disabled_chat_is_ignored(config, db, registry):
     from telethon import types, utils
 
