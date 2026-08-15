@@ -1,7 +1,7 @@
 """Typed, validated configuration loaded from the environment.
 
-Everything the bot needs comes from here. No secret is ever hardcoded, and
-missing optional configuration degrades a feature instead of crashing the bot.
+Core runtime settings are loaded here. Missing optional configuration degrades
+a feature instead of crashing the bot.
 """
 
 from __future__ import annotations

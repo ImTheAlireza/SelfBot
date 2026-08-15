@@ -104,7 +104,7 @@ python -m selfbot --check
 Expected:
 
 ```
-✅ Configuration valid — 41 commands registered.
+✅ Configuration valid — 43 commands registered.
 
 session      : ./data/selfbot
 database     : sqlite+aiosqlite:///./data/selfbot.db
@@ -139,6 +139,16 @@ Without this, `topdf fa` and Persian `stick` text render as boxes:
 ```bash
 curl -Lo assets/fonts/Vazirmatn-Regular.ttf \
   https://github.com/rastikerdar/vazirmatn/raw/master/fonts/ttf/Vazirmatn-Regular.ttf
+```
+
+### Step 9 — Use the `gpt` command
+
+The command is preconfigured to call `GPT_5_4_high` through ChatGPT API8 on
+RapidAPI. If its quota is exhausted, Adult GPT is used automatically as a
+backup. It does not require any `.env` settings. Start the bot and try:
+
+```text
+gpt What is the meaning of life?
 ```
 
 ### Step 10 — Enable CI on GitHub
@@ -201,7 +211,7 @@ Log in **once interactively** before enabling the service.
 </details>
 
 <details>
-<summary><b>supervisor</b> — enables <code>self status/restart/logs</code></summary>
+<summary><b>supervisor</b> — enables <code>self status/logs</code></summary>
 
 **1. Define the program** in your `supervisord.conf`:
 

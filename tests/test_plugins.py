@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -65,8 +66,8 @@ async def test_self_off_then_on(bot, registry):
 
 
 @pytest.mark.asyncio
-async def test_self_restart_without_supervisor_exits_gracefully(bot, registry):
-    """No supervisorctl available -> exit process, let container restart it."""
+async def test_self_restart_without_supervisor_reexecs_gracefully(bot, registry):
+    """No supervisorctl available -> replace the current Python process."""
     event = FakeEvent(raw_text="self restart")
     await registry.dispatch(bot, event, "self restart")
     assert any("Restarting" in r for r in event.replies)
@@ -101,6 +102,156 @@ async def test_remadmin_rejects_non_numeric(bot, registry):
     event = FakeEvent(raw_text="remadmin notanumber")
     await registry.dispatch(bot, event, "remadmin notanumber")
     assert any("numeric" in r.lower() for r in event.replies)
+
+
+# ---------------------------------------------------------------------------
+# Message deletion
+# ---------------------------------------------------------------------------
+
+
+def _delete_message(message_id: int, **media):
+    values = {"id": message_id, **media}
+    return type("DeleteMessage", (), values)()
+
+
+def test_del_is_the_only_deletion_command(registry):
+    assert registry.get("del") is not None
+    assert registry.get("purge") is None
+
+
+@pytest.mark.asyncio
+async def test_del_count_defaults_to_everyone_in_current_chat(bot, registry):
+    iterator_calls = []
+
+    async def iter_messages(chat_id, *, limit, from_user):
+        iterator_calls.append((chat_id, limit, from_user))
+        for message_id in (30, 29, 28):
+            yield _delete_message(message_id)
+
+    bot.client.iter_messages = iter_messages
+    event = FakeEvent(raw_text="del 3", chat_id=-777)
+
+    await registry.dispatch(bot, event, event.raw_text)
+
+    assert iterator_calls == [(-777, 3, None)]
+    assert bot.client.deleted == [(-777, [30, 29, 28])]
+    assert bot.confirm_prompts and "from everyone in this chat" in bot.confirm_prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_del_count_me_targets_only_own_messages_in_current_chat(bot, registry):
+    iterator_calls = []
+
+    async def iter_messages(chat_id, *, limit, from_user):
+        iterator_calls.append((chat_id, limit, from_user))
+        yield _delete_message(12)
+        yield _delete_message(11)
+
+    bot.client.iter_messages = iter_messages
+    event = FakeEvent(raw_text="del 2 -me", chat_id=-888)
+
+    await registry.dispatch(bot, event, event.raw_text)
+
+    assert iterator_calls == [(-888, 2, "me")]
+    assert bot.client.deleted == [(-888, [12, 11])]
+    assert bot.confirm_prompts == []
+
+
+@pytest.mark.asyncio
+async def test_del_type_me_filters_only_own_matching_media(bot, registry):
+    iterator_calls = []
+
+    async def iter_messages(chat_id, *, limit, from_user):
+        iterator_calls.append((chat_id, limit, from_user))
+        yield _delete_message(3, photo=object())
+        yield _delete_message(2, photo=None)
+        yield _delete_message(1, photo=object())
+
+    bot.client.iter_messages = iter_messages
+    event = FakeEvent(raw_text="del photos -me", chat_id=-999)
+
+    await registry.dispatch(bot, event, event.raw_text)
+
+    assert iterator_calls == [(-999, None, "me")]
+    assert bot.client.deleted == [(-999, [3, 1])]
+
+
+@pytest.mark.asyncio
+async def test_del_all_scans_full_current_chat_and_batches_deletes(bot, registry):
+    iterator_calls = []
+
+    async def iter_messages(chat_id, *, limit, from_user):
+        iterator_calls.append((chat_id, limit, from_user))
+        for message_id in range(205, 0, -1):
+            yield _delete_message(message_id)
+
+    bot.client.iter_messages = iter_messages
+    event = FakeEvent(raw_text="del all", chat_id=-1234)
+
+    await registry.dispatch(bot, event, event.raw_text)
+
+    assert iterator_calls == [(-1234, None, None)]
+    assert [chat_id for chat_id, _ids in bot.client.deleted] == [-1234, -1234, -1234]
+    assert [len(ids) for _chat_id, ids in bot.client.deleted] == [100, 100, 5]
+    deleted_ids = [
+        message_id
+        for _chat_id, ids in bot.client.deleted
+        for message_id in ids
+    ]
+    assert deleted_ids == list(range(205, 0, -1))
+
+
+@pytest.mark.asyncio
+async def test_del_rejects_me_flag_before_target(bot, registry):
+    event = FakeEvent(raw_text="del -me photos")
+
+    await registry.dispatch(bot, event, event.raw_text)
+
+    assert any("final argument" in reply for reply in event.replies)
+    assert bot.client.deleted == []
+
+
+# ---------------------------------------------------------------------------
+# User info
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_info_sends_profile_picture_as_a_named_photo(bot, registry):
+    entity = type(
+        "Entity",
+        (),
+        {
+            "id": 123,
+            "first_name": "Alice",
+            "last_name": "Example",
+            "username": "alice",
+            "premium": False,
+            "bot": False,
+            "photo": object(),
+        },
+    )()
+    bot.client.entities["@alice"] = entity
+
+    async def download_profile_photo(target, *, file, download_big):
+        assert target is entity
+        assert file is bytes
+        assert download_big is True
+        return b"\xff\xd8\xff\xe0fake-jpeg"
+
+    bot.client.download_profile_photo = download_profile_photo
+    event = FakeEvent(raw_text="info @alice")
+
+    await registry.dispatch(bot, event, event.raw_text)
+
+    assert len(bot.client.sent_files) == 1
+    upload = bot.client.sent_files[0]
+    uploaded_file = upload["file"]
+    assert isinstance(uploaded_file, BytesIO)
+    assert uploaded_file.name == "profile_123.jpg"
+    assert uploaded_file.closed
+    assert upload["force_document"] is False
+    assert "Alice Example" in upload["caption"]
 
 
 # ---------------------------------------------------------------------------

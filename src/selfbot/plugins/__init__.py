@@ -19,6 +19,7 @@ __all__ = ["load_all"]
 #: Modules loaded in this order so `help` categories read sensibly.
 PRELUDE = (
     "core",
+    "ai",
     "messaging",
     "files",
     "timers",

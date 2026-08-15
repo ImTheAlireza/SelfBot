@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import platform
 import sys
 import time
@@ -28,10 +29,22 @@ logger = logging.getLogger(__name__)
 CATEGORY = "Core"
 
 
-def _graceful_exit(bot: object) -> None:
-    """Exit the process so the container manager restarts it."""
-    import os
-    os._exit(0)
+def _restart_process() -> None:
+    """Replace this process with a fresh SelfBot instance.
+
+    This works even when the bot was started directly from a shell and no
+    Docker, systemd, or supervisord process manager is available. ``execv``
+    keeps the same PID and environment while loading the latest code from
+    disk. Application CLI flags, such as ``--env-file``, are preserved.
+    """
+    argv = [sys.executable, "-m", "selfbot", *sys.argv[1:]]
+    logger.info("Re-executing SelfBot with %s", sys.executable)
+    try:
+        os.execv(sys.executable, argv)
+    except OSError:
+        # If exec fails, leave the existing bot alive and make the reason
+        # visible in its logs instead of silently terminating it.
+        logger.exception("Could not re-execute SelfBot")
 
 
 @command(
@@ -123,7 +136,7 @@ async def cmd_self(ctx: Context) -> None:
         raise UsageError(
             "Usage: `self <on|off|restart|status|logs|diag>`\n"
             "• `on` / `off` — enable or pause command handling\n"
-            "• `restart` — restart via supervisor\n"
+            "• `restart` — restart this bot process\n"
             "• `status` — supervisor process state\n"
             "• `logs [n]` — tail the error log\n"
             "• `diag` — troubleshoot supervisor setup"
@@ -138,7 +151,7 @@ async def cmd_self(ctx: Context) -> None:
         ctx.bot.active = False
         await ctx.reply("⏸ Bot is now **paused**. Send `self on` to resume.")
     elif action == "restart":
-        await _supervisor_restart(ctx)
+        await _restart_bot(ctx)
     elif action == "status":
         await _supervisor_status(ctx)
     elif action == "logs":
@@ -193,58 +206,19 @@ def _not_found_help(ctx: Context, exc: SupervisorNotFound) -> str:
     )
 
 
-async def _supervisor_restart(ctx: Context) -> None:
-    """Restart the bot. If supervisorctl is available, use it; otherwise
-    just exit the process and let the container manager (Docker, systemd,
-    supervisord, etc.) restart it automatically.
+async def _restart_bot(ctx: Context) -> None:
+    """Restart by replacing the current interpreter.
+
+    Never call ``supervisorctl restart`` from inside the supervised process: it
+    waits for this process to exit while our event loop waits for
+    ``supervisorctl`` to finish, creating a deadlock until supervisord kills the
+    bot at ``stopwaitsecs``. Re-exec keeps the same PID, so supervisord continues
+    monitoring it without participating in the restart.
     """
-    supervisor = ctx.config.supervisor
-
-    # If supervisorctl is configured and can be found, use it.
-    if supervisor.enabled and resolve_supervisorctl(supervisor.executable):
-        runner = SupervisorRunner(
-            process_name=supervisor.process_name,
-            config_path=supervisor.config_path,
-            executable=supervisor.executable,
-        )
-        try:
-            runner.resolve()
-        except SupervisorNotFound as exc:
-            await ctx.reply(_not_found_help(ctx, exc))
-            return
-
-        await ctx.reply(
-            f"🔄 Restarting `{runner.process_name}` via supervisorctl…\n"
-            "I'll go offline for a few seconds."
-        )
-
-        try:
-            result = await runner.restart()
-        except asyncio.TimeoutError:
-            logger.info("supervisorctl restart timed out (likely restarting now)")
-            return
-        except SupervisorNotFound as exc:
-            await ctx.reply(_not_found_help(ctx, exc))
-            return
-        except OSError as exc:
-            await ctx.reply(f"❌ Could not run supervisorctl: `{exc}`")
-            return
-
-        if not result.ok:
-            await ctx.reply(
-                f"❌ Restart failed (exit {result.returncode}):\n"
-                f"`{truncate(result.output or 'no output', 500)}`"
-            )
-        elif result.output:
-            logger.info("supervisorctl restart: %s", result.output)
-        return
-
-    # No supervisorctl — just exit. The process manager (Docker `restart:
-    # unless-stopped`, systemd, etc.) will bring us back up automatically.
-    await ctx.reply("🔄 Restarting — exiting process. The container will restart me.")
-    logger.info("Restart requested; exiting process for automatic respawn")
-    # Schedule the shutdown so the reply gets sent first.
-    asyncio.get_event_loop().call_later(1.0, _graceful_exit, ctx.bot)
+    await ctx.reply("🔄 Restarting this process… I'll be back in a few seconds.")
+    logger.info("Restart requested; scheduling in-process re-exec")
+    # Give Telegram time to send the acknowledgement before replacing Python.
+    asyncio.get_event_loop().call_later(1.0, _restart_process)
 
 
 async def _supervisor_status(ctx: Context) -> None:

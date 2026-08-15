@@ -19,7 +19,7 @@ git push
 |---|---|
 | **lint** | `ruff check`, format check and `mypy` on `src/` and `tests/` |
 | **test** | Full suite on Python 3.10, 3.11 and 3.12, with coverage |
-| **smoke** | `python -m selfbot --check` — proves config loads and all 41 commands register |
+| **smoke** | `python -m selfbot --check` — proves config loads and all 43 commands register |
 | **secrets** | Fails the build if anything resembling an API hash, bot token or hardcoded password is committed |
 
 The secret scan is the one that matters most here: v1 leaked live credentials

@@ -123,8 +123,8 @@ async def test_auto_reply_condition_persists(db):
     await db.set_auto_reply(-100, "contain", "hey", "ho", reply_condition="sr")
     rules = await db.list_auto_replies(-100)
     assert len(rules) == 2
-    nr_rule = [r for r in rules if r.trigger == "hello"][0]
-    sr_rule = [r for r in rules if r.trigger == "hey"][0]
+    nr_rule = next(r for r in rules if r.trigger == "hello")
+    sr_rule = next(r for r in rules if r.trigger == "hey")
     assert nr_rule.reply_condition == "nr"
     assert sr_rule.reply_condition == "sr"
 

@@ -20,12 +20,13 @@
 
 ## What it does
 
-42 commands for file manipulation, timers, stickers, QR codes, weather,
+44 commands for AI, file manipulation, timers, stickers, QR codes, weather,
 dictionaries and chat automation — all driven from your own Telegram account by
 typing commands into any chat.
 
 | | |
 |---|---|
+| 🧠 **AI** | Ask GPT 5.4 High through ChatGPT API8 on RapidAPI with `gpt <prompt>`. |
 | 📁 **Files** | Zip/unzip with AES passwords, batch queues, rename, audio tag editing, PDF page extraction. |
 | ⏰ **Timers** | Live-updating countdowns that survive restarts. |
 | 🎨 **Stickers** | Render text to stickers and manage packs via a helper bot. |
@@ -75,7 +76,7 @@ up** — losing it means re-authenticating.
 
 ## Configuration
 
-Everything is environment-driven; no secret ever goes in source. See
+Telegram, storage, logging, and process settings are environment-driven. See
 [`.env.example`](.env.example) for the full annotated list.
 
 | Variable | Required | Default | Purpose |
@@ -87,7 +88,7 @@ Everything is environment-driven; no secret ever goes in source. See
 | `COMMAND_PREFIX` | | *(none)* | Set to `.` to require `.help` |
 | `STARTUP_NOTIFY` | | `me` | Online message target: `me`, `off`, or a chat ID |
 | `LOG_CHANNEL_ID` | | — | Mirror warnings/errors to a private channel |
-| `SUPERVISOR_PROCESS` | | `selfbot` | Enables `self status` / `self restart` |
+| `SUPERVISOR_PROCESS` | | `selfbot` | Enables supervisor-backed status and logs |
 | `MAX_FILE_SIZE_MB` | | `512` | Ceiling on downloads and uploads |
 
 <details>
@@ -118,6 +119,10 @@ Commands are typed as plain messages from your own account. Set
 | `status` | Uptime and runtime counters |
 | `self on\|off\|restart\|status\|logs\|diag` | 👑 Process control and supervisor troubleshooting |
 
+`self restart` directly replaces the current Python process while preserving
+its PID and environment. It deliberately does not call `supervisorctl restart`,
+which can deadlock when invoked by the process being restarted.
+
 ### Admin 👑
 | Command | Description |
 |---|---|
@@ -125,18 +130,32 @@ Commands are typed as plain messages from your own account. Set
 | `remadmin <id>` | Revoke access |
 | `adminlist` | List authorised users |
 
+### AI
+| Command | Description |
+|---|---|
+| `gpt <prompt>` | Ask `GPT_5_4_high` through ChatGPT API8 on RapidAPI |
+
+The RapidAPI endpoint, model, temperature, system prompt, and credentials are
+built into the AI plugin; no `.env` configuration is required. If ChatGPT API8
+returns HTTP 429, the command automatically retries through Adult GPT.
+
 ### Messaging
 | Command | Description |
 |---|---|
 | `spam <message> <count>` | Repeat a message, rate-limit aware |
 | `cancel` | Stop your running spam task |
-| `purge <count\|type> [--all-users]` | 👑 Delete your messages; add the flag for everyone's |
-| `info [user]` | User details (reply, mention, or yourself) |
+| `del <count\|type> [-me]` | 👑 Delete messages in the current chat; `-me` limits it to yours |
+| `info [user]` | User details and profile photo (reply, mention, or yourself) |
 | `qreply set\|remove\|list\|info` | Manage `-alias` shortcuts |
 | `-<alias>` | Expand a quick reply in place |
 
-`purge` types: `photos`, `videos`, `voices`, `videomsgs`, `musics`, `files`,
-`stickers`, `gifs`, `links`, `all`.
+`del` always operates on the chat where the command was sent and can never
+select another chat. Without `-me`, it targets messages from everyone that your
+account is allowed to delete. Append `-me` to target only your messages, for
+example `del 400 -me`, `del photos -me`, or `del all -me`.
+
+Types: `photos`, `videos`, `voices`, `videomsgs`, `musics`, `files`, `stickers`,
+`gifs`, `links`, `all`.
 
 ### Files
 | Command | Description |
@@ -220,7 +239,7 @@ usage hint rather than a traceback.
 ```bash
 pip install -e ".[dev,full]"
 
-pytest                      # 253 tests
+pytest                      # 278 tests
 pytest --cov=selfbot        # with coverage
 ruff check src tests        # lint
 mypy src/selfbot            # type check
@@ -246,9 +265,8 @@ The original single-file `self.py` was replaced by the `src/selfbot/` package.
 3. Run `python -m selfbot` instead of `python self.py`.
 4. Your existing MySQL data still works — set `DATABASE_URL` to point at it.
 
-Renamed commands: `zipfile`→`zip` (alias kept), `del`→`purge` (alias kept),
-`dw`→`weather` (alias kept), `hw`→`hourly` (alias kept), `qradv` folded into
-`qr --fg/--bg`.
+Renamed commands: `zipfile`→`zip` (alias kept), `dw`→`weather` (alias kept),
+`hw`→`hourly` (alias kept), and `qradv` was folded into `qr --fg/--bg`.
 
 ### What changed under the hood
 

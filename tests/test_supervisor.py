@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from conftest import FakeEvent
+from selfbot.plugins import core as core_plugin
 from selfbot.services import supervisor as sup
 from selfbot.services.supervisor import (
     STATE_EMOJI,
@@ -287,8 +288,8 @@ async def test_status_command_without_process_name_explains(bot, registry):
 
 
 @pytest.mark.asyncio
-async def test_restart_with_supervisorctl(bot, registry, stub_ctl):
-    """Restart via supervisorctl when it's available."""
+async def test_restart_bypasses_supervisorctl(bot, registry, stub_ctl, monkeypatch):
+    """A managed bot must re-exec instead of deadlocking on supervisorctl."""
     import dataclasses
 
     bot.config = dataclasses.replace(
@@ -299,17 +300,24 @@ async def test_restart_with_supervisorctl(bot, registry, stub_ctl):
             executable=str(stub_ctl),
         ),
     )
+    monkeypatch.setattr(
+        core_plugin,
+        "resolve_supervisorctl",
+        lambda *_: pytest.fail("restart must not invoke supervisorctl"),
+    )
 
     event = FakeEvent(raw_text="self restart")
     await registry.dispatch(bot, event, "self restart")
 
     assert not bot.confirm_prompts, "restart should not ask for confirmation"
-    assert any("Restarting" in r for r in event.replies)
+    assert any("Restarting this process" in r for r in event.replies)
 
 
 @pytest.mark.asyncio
-async def test_restart_without_supervisorctl_exits_process(bot, registry, isolated_env, monkeypatch):
-    """Without supervisorctl, restart exits the process so Docker restarts it."""
+async def test_restart_without_supervisorctl_reexecs_process(
+    bot, registry, isolated_env, monkeypatch
+):
+    """Without supervisorctl, restart replaces the running Python process."""
     import dataclasses
 
     monkeypatch.setattr(sup.sys, "executable", str(isolated_env / "nowhere" / "python"))
@@ -322,6 +330,37 @@ async def test_restart_without_supervisorctl_exits_process(bot, registry, isolat
     await registry.dispatch(bot, event, "self restart")
 
     assert any("Restarting" in r for r in event.replies)
+    assert any("this process" in r for r in event.replies)
+
+
+def test_direct_restart_reexecs_current_interpreter_and_preserves_args(monkeypatch):
+    calls = []
+    monkeypatch.setattr(core_plugin.sys, "executable", "/venv/bin/python")
+    monkeypatch.setattr(
+        core_plugin.sys,
+        "argv",
+        ["/project/src/selfbot/__main__.py", "--env-file", "production.env"],
+    )
+    monkeypatch.setattr(
+        core_plugin.os,
+        "execv",
+        lambda executable, argv: calls.append((executable, argv)),
+    )
+
+    core_plugin._restart_process()
+
+    assert calls == [
+        (
+            "/venv/bin/python",
+            [
+                "/venv/bin/python",
+                "-m",
+                "selfbot",
+                "--env-file",
+                "production.env",
+            ],
+        )
+    ]
 
 
 # ---------------------------------------------------------------------------
