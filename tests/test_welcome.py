@@ -78,6 +78,14 @@ def test_empty_profile_name_falls_back():
     assert render_welcome("hi [name]", user) == "hi User"
 
 
+def test_render_welcome_supports_html_and_custom_emojis():
+    user = FakeUser(id=777, first_name="Reza")
+    template = 'Welcome [nametag] <tg-emoji emoji-id="12345">🔥</tg-emoji>!'
+    rendered = render_welcome(template, user)
+    assert '<a href="tg://user?id=777">Reza</a>' in rendered
+    assert '<tg-emoji emoji-id="12345">🔥</tg-emoji>' in rendered
+
+
 # ---------------------------------------------------------------------------
 # The selfwlc command
 # ---------------------------------------------------------------------------

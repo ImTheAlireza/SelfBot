@@ -423,7 +423,8 @@ class SelfBot:
             return False
 
         try:
-            await event.edit(message)
+            parse_mode = "html" if "<tg-emoji" in message or "<a " in message else None
+            await event.edit(message, parse_mode=parse_mode)
             logger.debug("Quick reply %r expanded", alias)
             return True
         except Exception as exc:
@@ -502,7 +503,8 @@ class SelfBot:
                     continue
 
             try:
-                await event.reply(rule.reply_text)
+                parse_mode = "html" if "<tg-emoji" in rule.reply_text or "<a " in rule.reply_text else None
+                await event.reply(rule.reply_text, parse_mode=parse_mode)
                 logger.debug(
                     "Auto-replied in chat %s using %s %r (condition=%s)",
                     event.chat_id,
@@ -867,20 +869,21 @@ class SelfBot:
                 continue
 
             text = render_welcome(welcome.message, user)
+            parse_mode = "html" if "<tg-emoji" in text or "<a " in text else None
             try:
                 # Prefer replying to the join service message; fall back to a
                 # plain message when that is not possible.
                 try:
                     if reply_event is not None:
-                        await reply_event.reply(text)
+                        await reply_event.reply(text, parse_mode=parse_mode)
                     else:
                         await self.client.send_message(
-                            chat_id, text, reply_to=reply_to_msg_id
+                            chat_id, text, reply_to=reply_to_msg_id, parse_mode=parse_mode
                         )
                 except Exception:
                     if reply_event is None and reply_to_msg_id is None:
                         raise
-                    await self.client.send_message(chat_id, text)
+                    await self.client.send_message(chat_id, text, parse_mode=parse_mode)
                 logger.debug("Welcomed user %s in chat %s", user_id, chat_id)
             except FloodWaitError as exc:
                 logger.warning("Rate limited while welcoming; pausing %ss", exc.seconds)
