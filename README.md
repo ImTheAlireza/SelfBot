@@ -88,6 +88,7 @@ Telegram, storage, logging, and process settings are environment-driven. See
 | `COMMAND_PREFIX` | | *(none)* | Set to `.` to require `.help` |
 | `STARTUP_NOTIFY` | | `me` | Online message target: `me`, `off`, or a chat ID |
 | `LOG_CHANNEL_ID` | | — | Mirror warnings/errors to a private channel |
+| `RAPIDAPI_KEY` | | — | RapidAPI key for the `gpt` command |
 | `SUPERVISOR_PROCESS` | | `selfbot` | Enables supervisor-backed status and logs |
 | `MAX_FILE_SIZE_MB` | | `512` | Ceiling on downloads and uploads |
 
@@ -135,8 +136,7 @@ which can deadlock when invoked by the process being restarted.
 |---|---|
 | `gpt <prompt>` | Ask `GPT_5_4_high` through ChatGPT API8 on RapidAPI |
 
-The RapidAPI endpoint, model, temperature, system prompt, and credentials are
-built into the AI plugin; no `.env` configuration is required. If ChatGPT API8
+Set `RAPIDAPI_KEY` in `.env` to enable the `gpt` command. If ChatGPT API8
 returns HTTP 429, the command automatically retries through Adult GPT.
 
 ### Messaging
@@ -185,6 +185,8 @@ Durations: `90`, `15:30`, `1:15:30`, `2:12:15:30`, or `1h30m`.
 | `weather <city>` / `hourly <city>` | Forecasts — no API key needed |
 | `dic <word>` | Definitions, examples and pronunciation audio |
 | `currency` | Live IRR rates, gold and coins |
+| `emojinfo` | Inspect replied message for custom/premium emoji IDs & HTML tags |
+| `html <text>` | Send an HTML message supporting custom/premium emojis |
 
 ### Automation & Stickers
 | Command | Description |
@@ -194,6 +196,8 @@ Durations: `90`, `15:30`, `1:15:30`, `2:12:15:30`, or `1h30m`.
 | `selfwlc <set\|on\|off\|list\|clear> [-all]` | 👑 Welcome new members with a saved per-chat message (`[name]`, `[nametag]`, `[username]` and `[[username]/[nametag]]` tags; Persian supported) |
 | `setreact <@channel> <emoji>` | 👑 Auto-react to new posts |
 | `remreact <@channel>` / `reactlist` | 👑 Manage auto-reactions |
+| `startchallenge [count] [delay]` | 👑 Tag active members on a replied challenge message (default 1/msg, collision-aware) |
+| `stopchallenge` / `challengestatus` | 👑 Halt challenge tagging & clear memory, or view live status |
 | `stick [-save] <text>` | Render text to a sticker |
 | `stickerpack create\|open\|list\|close\|delete` | Manage packs |
 

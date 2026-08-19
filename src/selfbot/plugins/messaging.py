@@ -382,7 +382,15 @@ async def _qreply_set(ctx: Context) -> None:
         message = remainder.strip() or " ".join(ctx.args[2:])
     elif ctx.event.is_reply:
         replied = await ctx.get_reply_message()
-        message = (replied.raw_text or "").strip()
+        from telethon.extensions import html
+
+        if replied and getattr(replied, "entities", None):
+            try:
+                message = html.unparse(replied.message, replied.entities).strip()
+            except Exception:
+                message = (getattr(replied, "raw_text", "") or "").strip()
+        else:
+            message = (getattr(replied, "raw_text", "") or "").strip() if replied else ""
         if not message:
             raise ValidationError("The replied message has no text.")
     else:

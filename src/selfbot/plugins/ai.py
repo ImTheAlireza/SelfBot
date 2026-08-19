@@ -6,7 +6,7 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
-from ..errors import ProviderError, UsageError
+from ..errors import FeatureDisabledError, ProviderError, UsageError
 from ..registry import Context, command
 from ..utils.text import truncate
 
@@ -15,7 +15,6 @@ logger = logging.getLogger(__name__)
 CATEGORY = "AI"
 RAPIDAPI_HOST = "chatgpt-api8.p.rapidapi.com"
 RAPIDAPI_CHAT_URL = f"https://{RAPIDAPI_HOST}/chato"
-RAPIDAPI_KEY = "a58dc11fa1msha5c73c40f77f5a6p1a796fjsndf7d1e46f55f"
 RAPIDAPI_MODEL = "GPT_5_4_high"
 SYSTEM_PROMPT = "Format your relies with markdown when applicable"
 
@@ -33,26 +32,32 @@ BACKUP_RAPIDAPI_GENERE = "ai-gf-1"
 )
 async def cmd_gpt(ctx: Context) -> None:
     """Ask GPT through RapidAPI, with an automatic quota fallback."""
+    api_key = getattr(ctx.config.ai, "rapidapi_key", "") if hasattr(ctx.config, "ai") else ""
+    if not api_key:
+        raise FeatureDisabledError(
+            "RapidAPI key is not configured. Set `RAPIDAPI_KEY` in your `.env`."
+        )
+
     prompt = ctx.raw_args.strip()
     if not prompt:
         raise UsageError(f"Usage: `{ctx.config.command_prefix}gpt <prompt>`")
 
     status = await ctx.reply("🤖 Thinking…")
     try:
-        answer = await _rapidapi_completion(ctx.bot.http, prompt=prompt)
+        answer = await _rapidapi_completion(ctx.bot.http, prompt=prompt, api_key=api_key)
     finally:
         await _delete_status(status)
 
     await ctx.reply(answer)
 
 
-async def _rapidapi_completion(http: Any, *, prompt: str) -> str:
+async def _rapidapi_completion(http: Any, *, prompt: str, api_key: str) -> str:
     """Request one chat completion from RapidAPI and return its text."""
     response = await http.request(
         "POST",
         RAPIDAPI_CHAT_URL,
         headers={
-            "x-rapidapi-key": RAPIDAPI_KEY,
+            "x-rapidapi-key": api_key,
             "x-rapidapi-host": RAPIDAPI_HOST,
             "Content-Type": "application/json",
         },
@@ -74,14 +79,14 @@ async def _rapidapi_completion(http: Any, *, prompt: str) -> str:
     except Exception as exc:
         if response.status == 429:
             logger.warning("Primary RapidAPI quota reached; trying the backup API")
-            return await _backup_rapidapi_completion(http, prompt=prompt)
+            return await _backup_rapidapi_completion(http, prompt=prompt, api_key=api_key)
         raise ProviderError(
             f"RapidAPI sent an invalid response (HTTP {response.status})."
         ) from exc
 
     if response.status == 429:
         logger.warning("Primary RapidAPI quota reached; trying the backup API")
-        return await _backup_rapidapi_completion(http, prompt=prompt)
+        return await _backup_rapidapi_completion(http, prompt=prompt, api_key=api_key)
 
     if response.status >= 400:
         raise ProviderError(_format_rapidapi_error(payload, response.status))
@@ -92,13 +97,13 @@ async def _rapidapi_completion(http: Any, *, prompt: str) -> str:
     return _extract_answer(payload)
 
 
-async def _backup_rapidapi_completion(http: Any, *, prompt: str) -> str:
+async def _backup_rapidapi_completion(http: Any, *, prompt: str, api_key: str) -> str:
     """Use Adult GPT when the primary RapidAPI plan returns HTTP 429."""
     response = await http.request(
         "POST",
         BACKUP_RAPIDAPI_CHAT_URL,
         headers={
-            "x-rapidapi-key": RAPIDAPI_KEY,
+            "x-rapidapi-key": api_key,
             "x-rapidapi-host": BACKUP_RAPIDAPI_HOST,
             "Content-Type": "application/json",
         },

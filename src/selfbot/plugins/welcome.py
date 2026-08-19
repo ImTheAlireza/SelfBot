@@ -52,15 +52,18 @@ def _display_name(user: Any) -> str:
 def render_welcome(template: str, user: Any) -> str:
     """Fill a welcome template with one user's profile details.
 
-    ``user`` only needs ``id``, ``first_name``, ``last_name`` and
-    ``username`` attributes, so it works with Telethon users and test fakes
-    alike.
+    Supports both Markdown and HTML templates (including <tg-emoji> and <a>).
     """
     name = _display_name(user)
     user_id = getattr(user, "id", None)
     username = getattr(user, "username", None)
 
-    nametag = f"[{name}](tg://user?id={user_id})" if user_id else name
+    is_html = "<tg-emoji" in template or "<a " in template or "<b>" in template or "<i>" in template
+    if is_html:
+        nametag = f'<a href="tg://user?id={user_id}">{name}</a>' if user_id else name
+    else:
+        nametag = f"[{name}](tg://user?id={user_id})" if user_id else name
+
     username_text = f"@{username}" if username else ""
 
     text = template
@@ -132,7 +135,16 @@ async def _wlc_set(ctx: Context) -> None:
         )
 
     replied = await ctx.get_reply_message()
-    message = (getattr(replied, "raw_text", "") or "").strip() if replied else ""
+    from telethon.extensions import html
+
+    if replied and getattr(replied, "entities", None):
+        try:
+            message = html.unparse(replied.message, replied.entities).strip()
+        except Exception:
+            message = (getattr(replied, "raw_text", "") or "").strip()
+    else:
+        message = (getattr(replied, "raw_text", "") or "").strip() if replied else ""
+
     if not message:
         raise CommandError("That message has no text to save.")
     if len(message) > 4000:

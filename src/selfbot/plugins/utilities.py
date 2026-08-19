@@ -221,9 +221,16 @@ def _find_font() -> Path | None:
     """Locate a Unicode-capable TTF for Persian rendering."""
     candidates = [
         Path(__file__).resolve().parents[3] / "assets" / "fonts" / "Vazirmatn-Regular.ttf",
+        Path(__file__).resolve().parents[3] / "assets" / "fonts" / "Vazirmatn-Bold.ttf",
         Path("assets/fonts/Vazirmatn-Regular.ttf"),
+        Path("assets/fonts/Vazirmatn-Bold.ttf"),
         Path("fonts/Vazirmatn-Regular.ttf"),
         Path("/usr/share/fonts/truetype/vazirmatn/Vazirmatn-Regular.ttf"),
+        Path("/usr/share/fonts/truetype/vazirmatn/Vazirmatn-Bold.ttf"),
+        Path("/usr/share/fonts/truetype/vazir/Vazir-Bold.ttf"),
+        Path("/usr/share/fonts/truetype/vazir/Vazir-Regular.ttf"),
+        Path("/usr/share/fonts/truetype/noto/NotoSansArabic-Bold.ttf"),
+        Path("/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf"),
         Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
     ]
     return next((p for p in candidates if p.is_file()), None)
@@ -632,10 +639,99 @@ def _scrape_tgju(html: str) -> dict[str, int]:
     for row in soup.find_all("tr", attrs={"data-market-nameslug": True}):
         slug = row.get("data-market-nameslug")
         raw = row.get("data-price")
-        if not slug or not raw:
+        if not isinstance(slug, str) or not isinstance(raw, str):
             continue
         try:
-            out[slug] = int(str(raw).replace(",", "")) // 10
+            out[slug] = int(raw.replace(",", "")) // 10
         except ValueError:
             continue
     return out
+
+
+# ---------------------------------------------------------------------------
+# Custom / Premium Emojis & HTML
+# ---------------------------------------------------------------------------
+
+
+@command(
+    "emojinfo",
+    category=CATEGORY,
+    requires_reply=True,
+    usage="emojinfo",
+    aliases=("emojiinfo", "emojiid"),
+)
+async def cmd_emojinfo(ctx: Context) -> None:
+    """Extract custom/premium emoji IDs and ready-to-use HTML tags from a replied message."""
+    replied = await ctx.get_reply_message()
+    if not replied:
+        raise ValidationError("Reply to a message containing custom/premium emojis.")
+
+    from telethon import helpers, types
+
+    raw_text = (
+        getattr(replied, "raw_text", "")
+        or getattr(replied, "message", "")
+        or getattr(replied, "text", "")
+        or ""
+    )
+    s_text = helpers.add_surrogate(raw_text)
+    entities = getattr(replied, "entities", None) or []
+
+    custom_emojis: list[tuple[str, int]] = []
+    for entity in entities:
+        if isinstance(entity, types.MessageEntityCustomEmoji):
+            char = helpers.del_surrogate(
+                s_text[entity.offset : entity.offset + entity.length]
+            ).strip() or "✨"
+            custom_emojis.append((char, entity.document_id))
+
+    if not custom_emojis:
+        doc = getattr(replied, "document", None)
+        if doc:
+            for attr in getattr(doc, "attributes", []):
+                if isinstance(attr, types.DocumentAttributeCustomEmoji):
+                    custom_emojis.append((getattr(attr, "alt", "✨") or "✨", doc.id))
+
+    if not custom_emojis:
+        raise ValidationError("No custom or premium emojis found in the replied message.")
+
+    lines = [f"✨ **Found {len(custom_emojis)} Custom Emoji(s):**\n"]
+    for idx, (char, doc_id) in enumerate(custom_emojis, 1):
+        html_code = f'&lt;tg-emoji emoji-id="{doc_id}"&gt;{char}&lt;/tg-emoji&gt;'
+        lines.append(
+            f"**{idx}.** {char}\n"
+            f"  • **ID:** `{doc_id}`\n"
+            f"  • **HTML:** `{html_code}`\n"
+        )
+
+    lines.append("💡 **Tip:** Send with `html <text>` or use `<tg-emoji>` in HTML messages.")
+    await ctx.reply("\n".join(lines))
+
+
+@command(
+    "html",
+    category=CATEGORY,
+    min_args=1,
+    usage="html <html_text>",
+    examples=('html Hello <tg-emoji emoji-id="5368324170671202286">🔥</tg-emoji>',),
+    aliases=("sendhtml",),
+)
+async def cmd_html(ctx: Context) -> None:
+    """Send an HTML-formatted message supporting custom/premium emojis."""
+    html_text = ctx.raw_args.strip()
+    if not html_text:
+        raise UsageError("Provide an HTML message to send.")
+
+    if ctx.is_sudo:
+        try:
+            await ctx.event.delete()
+        except Exception:
+            pass
+
+    reply_to = None
+    if ctx.event.is_reply:
+        replied = await ctx.get_reply_message()
+        if replied:
+            reply_to = replied.id
+
+    await ctx.client.send_message(ctx.chat_id, html_text, parse_mode="html", reply_to=reply_to)

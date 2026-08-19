@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from conftest import FakeEvent
+from selfbot.config import AIConfig
 from selfbot.errors import ProviderError
 from selfbot.plugins.ai import (
     BACKUP_RAPIDAPI_CHAT_URL,
@@ -14,7 +15,6 @@ from selfbot.plugins.ai import (
     BACKUP_RAPIDAPI_HOST,
     RAPIDAPI_CHAT_URL,
     RAPIDAPI_HOST,
-    RAPIDAPI_KEY,
     RAPIDAPI_MODEL,
     SYSTEM_PROMPT,
     _extract_answer,
@@ -65,7 +65,7 @@ async def test_gpt_sends_prompt_to_rapidapi(bot, registry):
     assert method == "POST"
     assert url == RAPIDAPI_CHAT_URL
     assert kwargs["headers"] == {
-        "x-rapidapi-key": RAPIDAPI_KEY,
+        "x-rapidapi-key": bot.config.ai.rapidapi_key,
         "x-rapidapi-host": RAPIDAPI_HOST,
         "Content-Type": "application/json",
     }
@@ -98,7 +98,7 @@ async def test_gpt_uses_backup_api_when_primary_is_rate_limited(bot, registry):
     assert method == "POST"
     assert url == BACKUP_RAPIDAPI_CHAT_URL
     assert kwargs["headers"] == {
-        "x-rapidapi-key": RAPIDAPI_KEY,
+        "x-rapidapi-key": bot.config.ai.rapidapi_key,
         "x-rapidapi-host": BACKUP_RAPIDAPI_HOST,
         "Content-Type": "application/json",
     }
@@ -161,6 +161,21 @@ async def test_gpt_handles_error_embedded_in_http_200(bot, registry):
     await registry.dispatch(bot, event, event.raw_text)
 
     assert "upstream model failed" in event.replies[-1].lower()
+
+
+@pytest.mark.asyncio
+async def test_gpt_requires_configured_rapidapi_key(bot, registry):
+    import dataclasses
+
+    bot.config = dataclasses.replace(
+        bot.config,
+        ai=AIConfig(rapidapi_key=""),
+    )
+    event = FakeEvent(raw_text="gpt What is AI?")
+
+    await registry.dispatch(bot, event, event.raw_text)
+
+    assert any("RAPIDAPI_KEY" in reply for reply in event.replies)
 
 
 def test_extract_answer_supports_text_content_parts():

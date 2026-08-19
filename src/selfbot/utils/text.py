@@ -147,6 +147,7 @@ def styled_clock(seconds: int) -> str:
     hours, rem = divmod(rem, 3600)
     minutes, secs = divmod(rem, 60)
 
+    units: tuple[int, ...]
     if days:
         units = (days, hours, minutes, secs)
     elif hours:

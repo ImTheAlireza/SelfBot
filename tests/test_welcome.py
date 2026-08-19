@@ -78,6 +78,14 @@ def test_empty_profile_name_falls_back():
     assert render_welcome("hi [name]", user) == "hi User"
 
 
+def test_render_welcome_supports_html_and_custom_emojis():
+    user = FakeUser(id=777, first_name="Reza")
+    template = 'Welcome [nametag] <tg-emoji emoji-id="12345">🔥</tg-emoji>!'
+    rendered = render_welcome(template, user)
+    assert '<a href="tg://user?id=777">Reza</a>' in rendered
+    assert '<tg-emoji emoji-id="12345">🔥</tg-emoji>' in rendered
+
+
 # ---------------------------------------------------------------------------
 # The selfwlc command
 # ---------------------------------------------------------------------------
@@ -419,6 +427,17 @@ async def test_non_join_actions_are_ignored(config, db, registry):
 # ---------------------------------------------------------------------------
 
 
+def make_admin_log_result(entries: list[tuple[int, int, Any]], users: list[Any]) -> Any:
+    """entries: (event_id, user_id, action) triples."""
+    from telethon import types
+
+    events_ = [
+        types.ChannelAdminLogEvent(id=eid, date=None, user_id=uid, action=action)
+        for eid, uid, action in entries
+    ]
+    return types.channels.AdminLogResults(events=events_, chats=[], users=users)
+
+
 def make_join_request_update(chat: Any, user_id: int, msg_id: int = 42) -> Any:
     from telethon import types
 
@@ -443,9 +462,44 @@ async def test_welcomes_approved_join_request(config, db, registry):
     await db.set_welcome_enabled(chat_id, True)
     bot.client.entities[111] = FakeUser(id=111, first_name="علی")
 
+    # Admin log shows FakeMe.id approved the request
+    invite = types.ChatInviteExported(link="https://t.me/+x", admin_id=FakeMe.id, date=None)
+    action = types.ChannelAdminLogEventActionParticipantJoinByRequest(
+        invite=invite, approved_by=FakeMe.id
+    )
+    bot.client.admin_log_results.append(
+        make_admin_log_result([(1, 111, action)], [types.User(id=111, first_name="علی")])
+    )
+
     await bot._maybe_welcome_join_request(make_join_request_update(chat, 111))
 
     assert bot.client.sent_messages == [(chat_id, "سلام علی خوش اومدی")]
+
+
+@pytest.mark.asyncio
+async def test_skips_join_request_approved_by_other_admin(config, db, registry):
+    from telethon import types, utils
+
+    bot = make_selfbot(config, db, registry)
+    chat = types.PeerChannel(123)
+    chat_id = utils.get_peer_id(chat)
+
+    await db.set_welcome_message(chat_id, "سلام [name] خوش اومدی")
+    await db.set_welcome_enabled(chat_id, True)
+    bot.client.entities[111] = FakeUser(id=111, first_name="علی")
+
+    # Admin log shows another admin (9999) approved the request
+    invite = types.ChatInviteExported(link="https://t.me/+x", admin_id=9999, date=None)
+    action = types.ChannelAdminLogEventActionParticipantJoinByRequest(
+        invite=invite, approved_by=9999
+    )
+    bot.client.admin_log_results.append(
+        make_admin_log_result([(1, 111, action)], [types.User(id=111, first_name="علی")])
+    )
+
+    await bot._maybe_welcome_join_request(make_join_request_update(chat, 111))
+
+    assert bot.client.sent_messages == []
 
 
 @pytest.mark.asyncio
@@ -460,6 +514,15 @@ async def test_approved_user_resolved_from_update_entities(config, db, registry)
 
     await db.set_welcome_message(chat_id, "hi [name]")
     await db.set_welcome_enabled(chat_id, True)
+
+    invite = types.ChatInviteExported(link="https://t.me/+x", admin_id=FakeMe.id, date=None)
+    action = types.ChannelAdminLogEventActionParticipantJoinByRequest(
+        invite=invite, approved_by=FakeMe.id
+    )
+    bot.client.admin_log_results.append(
+        make_admin_log_result([(1, 111, action)], [types.User(id=111, first_name="Ali")])
+    )
+
     # get_entity would raise (user 111 NOT in bot.client.entities); the
     # update carries the user object instead, like real Telethon updates do.
     update = make_join_request_update(chat, 111)
@@ -521,6 +584,17 @@ async def test_same_join_is_not_welcomed_twice(config, db, registry):
     await db.set_welcome_enabled(chat_id, True)
     bot.client.entities[111] = FakeUser(id=111, first_name="Ali")
 
+    invite = types.ChatInviteExported(link="https://t.me/+x", admin_id=FakeMe.id, date=None)
+    action = types.ChannelAdminLogEventActionParticipantJoinByRequest(
+        invite=invite, approved_by=FakeMe.id
+    )
+    bot.client.admin_log_results.append(
+        make_admin_log_result([(1, 111, action)], [types.User(id=111, first_name="Ali")])
+    )
+    bot.client.admin_log_results.append(
+        make_admin_log_result([(1, 111, action)], [types.User(id=111, first_name="Ali")])
+    )
+
     update = make_join_request_update(chat, 111)
     await bot._maybe_welcome_join_request(update)
     await bot._maybe_welcome_join_request(update)
@@ -559,8 +633,6 @@ class AdminLogClient(FakeClient):
 
     def __init__(self) -> None:
         super().__init__()
-        self.admin_log_results: list[Any] = []
-        self.admin_log_requests: list[Any] = []
         self.admin_log_error: Exception | None = None
 
     async def __call__(self, request: Any) -> Any:
@@ -572,17 +644,6 @@ class AdminLogClient(FakeClient):
         from telethon import types
 
         return types.channels.AdminLogResults(events=[], chats=[], users=[])
-
-
-def make_admin_log_result(entries: list[tuple[int, int, Any]], users: list[Any]) -> Any:
-    """entries: (event_id, user_id, action) triples."""
-    from telethon import types
-
-    events_ = [
-        types.ChannelAdminLogEvent(id=eid, date=None, user_id=uid, action=action)
-        for eid, uid, action in entries
-    ]
-    return types.channels.AdminLogResults(events=events_, chats=[], users=users)
 
 
 def make_selfbot_with_admin_log(config, db, registry) -> SelfBot:
@@ -633,15 +694,37 @@ async def test_admin_log_join_by_request_is_welcomed(config, db, registry):
 
     await bot._poll_welcome_joins()  # records position (empty log)
 
-    invite = types.ChatInviteExported(link="https://t.me/+x", admin_id=1, date=None)
+    invite = types.ChatInviteExported(link="https://t.me/+x", admin_id=FakeMe.id, date=None)
     action = types.ChannelAdminLogEventActionParticipantJoinByRequest(
-        invite=invite, approved_by=1
+        invite=invite, approved_by=FakeMe.id
     )
     bot.client.admin_log_results.append(
         make_admin_log_result([(5, 111, action)], [types.User(id=111, first_name="علی")])
     )
     await bot._poll_welcome_joins()
     assert bot.client.sent_messages == [(chat_id, "سلام علی")]
+
+
+@pytest.mark.asyncio
+async def test_admin_log_join_by_request_by_other_admin_is_skipped(config, db, registry):
+    from telethon import types, utils
+
+    bot = make_selfbot_with_admin_log(config, db, registry)
+    chat_id = utils.get_peer_id(types.PeerChannel(123))
+    await db.set_welcome_message(chat_id, "سلام [name]")
+    await db.set_welcome_enabled(chat_id, True)
+
+    await bot._poll_welcome_joins()  # records position (empty log)
+
+    invite = types.ChatInviteExported(link="https://t.me/+x", admin_id=9999, date=None)
+    action = types.ChannelAdminLogEventActionParticipantJoinByRequest(
+        invite=invite, approved_by=9999
+    )
+    bot.client.admin_log_results.append(
+        make_admin_log_result([(5, 111, action)], [types.User(id=111, first_name="علی")])
+    )
+    await bot._poll_welcome_joins()
+    assert bot.client.sent_messages == []
 
 
 @pytest.mark.asyncio
