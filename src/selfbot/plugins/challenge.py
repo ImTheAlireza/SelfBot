@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -20,6 +21,9 @@ from ..utils.text import format_duration
 logger = logging.getLogger(__name__)
 
 CATEGORY = "Automation"
+
+MENTION_RE = re.compile(r"@([a-zA-Z0-9_]{3,32})")
+TG_URL_RE = re.compile(r"tg://user\?id=(\d+)")
 
 
 @dataclass(slots=True)
@@ -51,14 +55,20 @@ def extract_mentions(message: Any) -> tuple[set[int], set[str]]:
     """Extract mentioned user IDs and usernames from a message."""
     user_ids: set[int] = set()
     usernames: set[str] = set()
-    text = getattr(message, "message", "") or getattr(message, "text", "") or ""
-    entities = getattr(message, "entities", None) or []
+    text = (
+        getattr(message, "raw_text", "")
+        or getattr(message, "message", "")
+        or getattr(message, "text", "")
+        or ""
+    )
 
+    # 1. Extract from entities (if any)
+    entities = getattr(message, "entities", None) or []
     for entity in entities:
         if isinstance(entity, types.MessageEntityMentionName):
             user_ids.add(entity.user_id)
         elif isinstance(entity, types.MessageEntityMention):
-            mention = text[entity.offset : entity.offset + entity.length].lstrip("@").lower()
+            mention = text[entity.offset : entity.offset + entity.length].lstrip("@").lower().strip()
             if mention:
                 usernames.add(mention)
         elif isinstance(entity, types.MessageEntityTextUrl):
@@ -69,6 +79,17 @@ def extract_mentions(message: Any) -> tuple[set[int], set[str]]:
                     user_ids.add(uid)
                 except ValueError:
                     pass
+
+    # 2. Extract from raw text using regex for @usernames and tg:// user links
+    for m in MENTION_RE.findall(text):
+        uname = m.lower().lstrip("@").strip()
+        if uname:
+            usernames.add(uname)
+    for uid_str in TG_URL_RE.findall(text):
+        try:
+            user_ids.add(int(uid_str))
+        except ValueError:
+            pass
 
     return user_ids, usernames
 
@@ -102,7 +123,7 @@ def format_user_mention(user: Any) -> str:
     """Format a clickable mention or username for a user."""
     username = getattr(user, "username", None)
     if username:
-        return f"@{username}"
+        return f"@{username.lstrip('@')}"
     user_id = getattr(user, "id", None)
     first_name = (getattr(user, "first_name", "") or "").strip()
     name = first_name or "User"
@@ -110,20 +131,21 @@ def format_user_mention(user: Any) -> str:
 
 
 async def _scan_existing_mentions(
-    client: Any, chat_id: int, challenge_msg_id: int, limit: int = 1000
+    client: Any, chat_id: int, challenge_msg_id: int, limit: int = 3000
 ) -> tuple[set[int], set[str]]:
-    """Scan recent messages replying to the challenge message for already tagged users."""
+    """Scan all messages in the chat since the challenge message for already tagged users."""
     tagged_uids: set[int] = set()
     tagged_unames: set[str] = set()
 
     try:
-        async for msg in client.iter_messages(chat_id, min_id=max(0, challenge_msg_id - 1), limit=limit):
-            reply_to = getattr(msg, "reply_to", None)
-            reply_to_msg_id = getattr(reply_to, "reply_to_msg_id", None)
-            if reply_to_msg_id == challenge_msg_id or msg.id == challenge_msg_id:
-                uids, unames = extract_mentions(msg)
-                tagged_uids.update(uids)
-                tagged_unames.update(unames)
+        async for msg in client.iter_messages(
+            chat_id, min_id=max(0, challenge_msg_id - 1), limit=limit
+        ):
+            if not msg:
+                continue
+            uids, unames = extract_mentions(msg)
+            tagged_uids.update(uids)
+            tagged_unames.update(unames)
     except Exception:
         logger.debug("Could not scan existing replies in chat %s", chat_id, exc_info=True)
 
@@ -146,9 +168,9 @@ async def _challenge_worker(ctx: Context, state: ChallengeState) -> None:
             while state.candidates and len(batch) < state.batch_size:
                 user = state.candidates.pop()
                 uid = getattr(user, "id", None)
-                uname = (getattr(user, "username", "") or "").lower()
+                uname = (getattr(user, "username", "") or "").lower().lstrip("@").strip()
 
-                if uid in state.tagged_user_ids or (uname and uname in state.tagged_usernames):
+                if (uid and uid in state.tagged_user_ids) or (uname and uname in state.tagged_usernames):
                     continue
                 batch.append(user)
 
@@ -186,7 +208,7 @@ async def _challenge_worker(ctx: Context, state: ChallengeState) -> None:
             # Mark as tagged
             for u in batch:
                 uid = getattr(u, "id", None)
-                uname = (getattr(u, "username", "") or "").lower()
+                uname = (getattr(u, "username", "") or "").lower().lstrip("@").strip()
                 if uid:
                     state.tagged_user_ids.add(uid)
                 if uname:
@@ -330,8 +352,8 @@ async def cmd_startchallenge(ctx: Context) -> None:
                 continue
             seen_ids.add(uid)
 
-            uname = (getattr(user, "username", "") or "").lower()
-            if uid in tagged_uids or (uname and uname in tagged_unames):
+            uname = (getattr(user, "username", "") or "").lower().lstrip("@").strip()
+            if (uid and uid in tagged_uids) or (uname and uname in tagged_unames):
                 continue
 
             if is_active_user(user, now_dt):

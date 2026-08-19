@@ -89,6 +89,17 @@ def test_extract_mentions_from_message_entities():
     assert unames == {"user1", "user2"}
 
 
+def test_extract_mentions_from_plain_text_without_entities():
+    """Messages like in real group chats often contain plain text @usernames."""
+    class DummyPlainMsg:
+        raw_text = "@hendona\n@reyhaneh362 @mina_saadatt\n[Ali](tg://user?id=789)"
+        entities: ClassVar[list[Any]] = []
+
+    uids, unames = extract_mentions(DummyPlainMsg())
+    assert uids == {789}
+    assert unames == {"hendona", "reyhaneh362", "mina_saadatt"}
+
+
 # ---------------------------------------------------------------------------
 # Commands: startchallenge, stopchallenge, challengestatus
 # ---------------------------------------------------------------------------
@@ -176,6 +187,59 @@ async def test_startchallenge_and_stopchallenge_flow(bot, registry):
     assert chat_id not in bot.challenge_tasks
     assert any("Challenge tagging stopped" in r for r in stop_event.replies)
     assert any("All session data cleared from memory" in r for r in stop_event.replies)
+
+
+@pytest.mark.asyncio
+async def test_startchallenge_scans_previous_tags_from_everyone(bot, registry):
+    """Scans all mentions since challenge msg from self and others to prevent duplicates."""
+    chat_id = -100999
+    challenge_msg = FakeMessage(id=100, text="Challenge post")
+
+    candidates = [
+        DummyUser(user_id=1, first_name="User1", username="hendona", status=types.UserStatusRecently()),
+        DummyUser(user_id=2, first_name="User2", username="reyhaneh362", status=types.UserStatusRecently()),
+        DummyUser(user_id=3, first_name="User3", username="mina_saadatt", status=types.UserStatusRecently()),
+        DummyUser(user_id=4, first_name="NewUser", username="newuser", status=types.UserStatusRecently()),
+    ]
+
+    # Prior messages from HOSein, Abolfazl, or ourselves
+    past_messages = [
+        FakeMessage(id=101, text="@hendona"),
+        FakeMessage(id=102, text="@reyhaneh362 @mina_saadatt"),
+    ]
+
+    async def iter_participants(_chat_id):
+        for u in candidates:
+            yield u
+
+    async def get_participants(_chat_id, **_k):
+        return [DummyUser(user_id=SUDO_ID, first_name="Owner")]
+
+    async def iter_messages(_chat_id, **_k):
+        for m in past_messages:
+            yield m
+
+    bot.client.iter_participants = iter_participants
+    bot.client.get_participants = get_participants
+    bot.client.iter_messages = iter_messages
+    bot.challenge_tasks = {}
+
+    event = FakeEvent(
+        raw_text="startchallenge",
+        chat_id=chat_id,
+        is_reply=True,
+        reply_message=challenge_msg,
+    )
+    await registry.dispatch(bot, event, "startchallenge")
+
+    assert chat_id in bot.challenge_tasks
+    state = bot.challenge_tasks[chat_id]
+    # hendona, reyhaneh362, mina_saadatt were already tagged in chat -> only newuser remains!
+    assert state.total_candidates == 1
+    assert state.candidates[0].username == "newuser"
+    assert state.tagged_usernames >= {"hendona", "reyhaneh362", "mina_saadatt"}
+
+    await registry.dispatch(bot, FakeEvent(raw_text="stopchallenge", chat_id=chat_id), "stopchallenge")
 
 
 @pytest.mark.asyncio

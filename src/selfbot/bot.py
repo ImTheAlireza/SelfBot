@@ -358,9 +358,10 @@ class SelfBot:
         # Real-time collision detection for active challenge sessions
         challenge_state = self.challenge_tasks.get(event.chat_id)
         if challenge_state and not challenge_state.is_cancelled:
+            msg_id = getattr(event.message, "id", 0) or 0
             reply_to = getattr(event.message, "reply_to", None)
             reply_to_msg_id = getattr(reply_to, "reply_to_msg_id", None)
-            if reply_to_msg_id == challenge_state.challenge_msg_id:
+            if reply_to_msg_id == challenge_state.challenge_msg_id or msg_id >= challenge_state.challenge_msg_id:
                 from .plugins.challenge import extract_mentions
 
                 uids, unames = extract_mentions(event.message)
