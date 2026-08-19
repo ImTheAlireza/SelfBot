@@ -185,6 +185,8 @@ Durations: `90`, `15:30`, `1:15:30`, `2:12:15:30`, or `1h30m`.
 | `weather <city>` / `hourly <city>` | Forecasts — no API key needed |
 | `dic <word>` | Definitions, examples and pronunciation audio |
 | `currency` | Live IRR rates, gold and coins |
+| `emojinfo` | Inspect replied message for custom/premium emoji IDs & HTML tags |
+| `html <text>` | Send an HTML message supporting custom/premium emojis |
 
 ### Automation & Stickers
 | Command | Description |

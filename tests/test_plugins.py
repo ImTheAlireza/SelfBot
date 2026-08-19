@@ -778,3 +778,29 @@ async def test_stickerpack_create_requires_title(bot, registry):
     event = FakeEvent(raw_text="stickerpack create mypack")
     await registry.dispatch(bot, event, event.raw_text)
     assert any("Usage" in r for r in event.replies)
+
+
+@pytest.mark.asyncio
+async def test_emojinfo_extracts_custom_emojis(bot, registry):
+    from telethon import types
+
+    msg = FakeMessage(id=10, text="🔥 Cool")
+    msg.raw_text = "🔥 Cool"  # type: ignore[attr-defined]
+    msg.entities = [  # type: ignore[attr-defined]
+        types.MessageEntityCustomEmoji(offset=0, length=2, document_id=5368324170671202286)
+    ]
+
+    event = FakeEvent(raw_text="emojinfo", is_reply=True, reply_message=msg)
+    await registry.dispatch(bot, event, "emojinfo")
+
+    assert any("5368324170671202286" in r for r in event.replies)
+    assert any("<tg-emoji" in r for r in event.replies)
+
+
+@pytest.mark.asyncio
+async def test_html_sends_html_message(bot, registry):
+    event = FakeEvent(raw_text='html Hello <tg-emoji emoji-id="123">🔥</tg-emoji>')
+    await registry.dispatch(bot, event, event.raw_text)
+
+    assert len(bot.client.sent_messages) == 1
+    assert 'emoji-id="123"' in bot.client.sent_messages[0][1]
