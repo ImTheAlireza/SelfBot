@@ -18,7 +18,7 @@ import logging
 import os
 import shutil
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -266,14 +266,8 @@ class ProgramAudit:
     config_file: str = ""
     command: str = ""
     directory: str = ""
-    problems: list[str] | None = None
-    notes: list[str] | None = None
-
-    def __post_init__(self) -> None:
-        if self.problems is None:
-            self.problems = []
-        if self.notes is None:
-            self.notes = []
+    problems: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
 
 
 def _iter_config_files(config_path: str) -> list[Path]:

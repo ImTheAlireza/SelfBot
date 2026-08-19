@@ -330,35 +330,35 @@ async def cmd_metadata(ctx: Context) -> None:
                 from mutagen.mp3 import MP3
 
                 try:
-                    audio = MP3(source, ID3=EasyID3)
+                    mp3 = MP3(source, ID3=EasyID3)
                 except Exception:
-                    audio = MP3(source)
-                    audio.add_tags()
-                    audio = MP3(source, ID3=EasyID3)
-                audio["title"] = title
-                audio["artist"] = artist
-                audio.save()
+                    mp3 = MP3(source)
+                    mp3.add_tags()
+                    mp3 = MP3(source, ID3=EasyID3)
+                mp3["title"] = title
+                mp3["artist"] = artist
+                mp3.save()
             elif extension in {".m4a", ".mp4"}:
                 from mutagen.mp4 import MP4
 
-                audio = MP4(source)
-                audio["\xa9nam"] = title
-                audio["\xa9ART"] = artist
-                audio.save()
+                mp4 = MP4(source)
+                mp4["\xa9nam"] = title
+                mp4["\xa9ART"] = artist
+                mp4.save()
             elif extension == ".flac":
                 from mutagen.flac import FLAC
 
-                audio = FLAC(source)
-                audio["title"] = title
-                audio["artist"] = artist
-                audio.save()
+                flac = FLAC(source)
+                flac["title"] = title
+                flac["artist"] = artist
+                flac.save()
             elif extension in {".ogg", ".oga"}:
                 from mutagen.oggvorbis import OggVorbis
 
-                audio = OggVorbis(source)
-                audio["title"] = title
-                audio["artist"] = artist
-                audio.save()
+                ogg = OggVorbis(source)
+                ogg["title"] = title
+                ogg["artist"] = artist
+                ogg.save()
             else:
                 raise ValidationError(
                     f"Unsupported format `{extension or '?'}`. Use MP3, M4A, FLAC or OGG."

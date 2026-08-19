@@ -758,6 +758,14 @@ def test_sticker_rendering_handles_long_text(tmp_path: Path):
     assert output.is_file()
 
 
+def test_sticker_rendering_scales_short_text_boldly(tmp_path: Path):
+    from selfbot.plugins.stickers import render_sticker
+
+    output = tmp_path / "short.webp"
+    render_sticker("سلام", output)
+    assert output.is_file()
+
+
 @pytest.mark.asyncio
 async def test_stickerpack_help(bot, registry):
     event = FakeEvent(raw_text="stickerpack")

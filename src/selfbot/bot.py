@@ -73,6 +73,7 @@ class SelfBot:
         self.timer_tasks: dict[str, asyncio.Task[Any]] = {}
         self.zip_queue: dict[int, list[Any]] = {}
         self.active_sticker_pack: dict[int, dict[str, Any]] = {}
+        self.challenge_tasks: dict[int, Any] = {}
         self.pending_confirmations: dict[tuple[int, int], asyncio.Future[bool]] = {}
 
         self._auto_reply_cache: dict[int, list[Any]] = {}
@@ -254,12 +255,15 @@ class SelfBot:
 
         for task in list(self.timer_tasks.values()) + list(self.spam_tasks.values()):
             task.cancel()
+        for state in list(self.challenge_tasks.values()):
+            state.cancel()
         for task in list(self._background):
             task.cancel()
 
         pending = [
             *self.timer_tasks.values(),
             *self.spam_tasks.values(),
+            *[s.task for s in self.challenge_tasks.values() if s.task],
             *self._background,
         ]
         if pending:
@@ -350,6 +354,20 @@ class SelfBot:
 
     async def _handle_message(self, event: Any) -> None:
         await self._maybe_react(event)
+
+        # Real-time collision detection for active challenge sessions
+        challenge_state = self.challenge_tasks.get(event.chat_id)
+        if challenge_state and not challenge_state.is_cancelled:
+            reply_to = getattr(event.message, "reply_to", None)
+            reply_to_msg_id = getattr(reply_to, "reply_to_msg_id", None)
+            if reply_to_msg_id == challenge_state.challenge_msg_id:
+                from .plugins.challenge import extract_mentions
+
+                uids, unames = extract_mentions(event.message)
+                if uids or unames:
+                    challenge_state.tagged_user_ids.update(uids)
+                    challenge_state.tagged_usernames.update(unames)
+                    challenge_state.tagged_by_others_count += len(uids | unames)
 
         text = (event.raw_text or "").strip()
         if not text:
@@ -561,7 +579,7 @@ class SelfBot:
         await self._welcome_users(welcome, chat_id, users, reply_event=event)
 
     async def _maybe_welcome_join_request(self, update: Any) -> None:
-        """Greet users whose join request was approved.
+        """Greet users whose join request was approved by this account.
 
         Telethon's ``ChatAction`` event does not recognise the
         ``MessageActionChatJoinedByRequest`` service message, so approvals
@@ -584,6 +602,16 @@ class SelfBot:
             return
 
         user_id = utils.get_peer_id(message.from_id)
+
+        # Check if the join request was approved by this account.
+        if not await self._is_approved_by_me(chat_id, user_id):
+            logger.info(
+                "Welcome: skipping join request for user %s in chat %s (not approved by me)",
+                user_id,
+                chat_id,
+            )
+            return
+
         user = await self._resolve_user(update, chat_id, user_id, message.id)
         if user is None:
             logger.warning(
@@ -591,10 +619,46 @@ class SelfBot:
             )
             return
 
-        logger.info("Welcome: join request approved by user %s in chat %s", user_id, chat_id)
+        logger.info("Welcome: join request approved by me for user %s in chat %s", user_id, chat_id)
         await self._welcome_users(
             welcome, chat_id, [user], reply_to_msg_id=getattr(message, "id", None)
         )
+
+    async def _is_approved_by_me(self, chat_id: int, user_id: int) -> bool:
+        """Check if a join request was approved by the logged-in account."""
+        my_id = getattr(self.me, "id", None)
+        if my_id is None:
+            return False
+
+        real_id, peer_type = utils.resolve_id(chat_id)
+        if peer_type is not types.PeerChannel:
+            return False
+
+        try:
+            result = await self.client(
+                functions.channels.GetAdminLogRequest(
+                    channel=real_id,
+                    q="",
+                    max_id=0,
+                    min_id=0,
+                    limit=10,
+                    events_filter=types.ChannelAdminLogEventsFilter(invite=True),
+                )
+            )
+            for event in getattr(result, "events", []) or []:
+                if event.user_id == user_id and isinstance(
+                    event.action, types.ChannelAdminLogEventActionParticipantJoinByRequest
+                ):
+                    return bool(event.action.approved_by == my_id)
+        except Exception:
+            logger.debug(
+                "Could not check join request approver in admin log for chat %s",
+                chat_id,
+                exc_info=True,
+            )
+            return False
+
+        return False
 
     async def _resolve_user(
         self, update: Any, chat_id: int, user_id: int, msg_id: int | None
@@ -709,6 +773,7 @@ class SelfBot:
             return  # first pass only records the position; no back-greeting
 
         users_by_id = {u.id: u for u in getattr(result, "users", []) or []}
+        my_id = getattr(self.me, "id", None)
         join_actions = (
             types.ChannelAdminLogEventActionParticipantJoin,
             types.ChannelAdminLogEventActionParticipantJoinByInvite,
@@ -717,6 +782,17 @@ class SelfBot:
         joined: list[Any] = []
         for log_event in sorted(events_list, key=lambda e: e.id):
             if not isinstance(log_event.action, join_actions):
+                continue
+            if (
+                isinstance(log_event.action, types.ChannelAdminLogEventActionParticipantJoinByRequest)
+                and (my_id is None or log_event.action.approved_by != my_id)
+            ):
+                logger.debug(
+                    "Welcome: skipping join request for %s; approved by %s (not me %s)",
+                    log_event.user_id,
+                    getattr(log_event.action, "approved_by", None),
+                    my_id,
+                )
                 continue
             user = users_by_id.get(log_event.user_id)
             if user is None:

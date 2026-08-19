@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import textwrap
 from pathlib import Path
+from typing import Any
 
 from ..errors import FeatureDisabledError, UsageError, ValidationError
 from ..registry import Context, command
@@ -23,12 +23,63 @@ PADDING = 32
 def _font_path() -> Path | None:
     candidates = [
         Path(__file__).resolve().parents[3] / "assets" / "fonts" / "Vazirmatn-Regular.ttf",
+        Path(__file__).resolve().parents[3] / "assets" / "fonts" / "Vazirmatn-Bold.ttf",
         Path("assets/fonts/Vazirmatn-Regular.ttf"),
+        Path("assets/fonts/Vazirmatn-Bold.ttf"),
         Path("/usr/share/fonts/truetype/vazirmatn/Vazirmatn-Regular.ttf"),
+        Path("/usr/share/fonts/truetype/vazirmatn/Vazirmatn-Bold.ttf"),
+        Path("/usr/share/fonts/truetype/vazir/Vazir-Bold.ttf"),
+        Path("/usr/share/fonts/truetype/vazir/Vazir-Regular.ttf"),
+        Path("/usr/share/fonts/truetype/noto/NotoSansArabic-Bold.ttf"),
+        Path("/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf"),
         Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
         Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
     ]
     return next((p for p in candidates if p.is_file()), None)
+
+
+def _wrap_words(
+    text: str,
+    draw: Any,
+    font: Any,
+    max_width: float,
+) -> tuple[list[str], bool]:
+    """Wrap text to fit within max_width using actual font measurements."""
+    lines: list[str] = []
+    has_broken_word = False
+
+    for paragraph in text.split("\n"):
+        paragraph = paragraph.strip()
+        if not paragraph:
+            lines.append("")
+            continue
+
+        words = paragraph.split()
+        current = ""
+        for word in words:
+            candidate = f"{current} {word}".strip()
+            if draw.textlength(shape_rtl(candidate), font=font) <= max_width:
+                current = candidate
+            else:
+                if current:
+                    lines.append(current)
+                if draw.textlength(shape_rtl(word), font=font) <= max_width:
+                    current = word
+                else:
+                    has_broken_word = True
+                    chunk = ""
+                    for ch in word:
+                        if draw.textlength(shape_rtl(chunk + ch), font=font) <= max_width:
+                            chunk += ch
+                        else:
+                            if chunk:
+                                lines.append(chunk)
+                            chunk = ch
+                    current = chunk
+        if current:
+            lines.append(current)
+
+    return lines, has_broken_word
 
 
 def render_sticker(text: str, output: Path, watermark: str = "") -> Path:
@@ -39,83 +90,84 @@ def render_sticker(text: str, output: Path, watermark: str = "") -> Path:
     draw = ImageDraw.Draw(image)
 
     font_file = _font_path()
+    font_str = str(font_file) if font_file else None
     max_width = CANVAS - 2 * PADDING
     max_height = CANVAS - 2 * PADDING - (44 if watermark else 0)
 
-    chosen_font = None
+    chosen_font: Any = None
     chosen_lines: list[str] = []
+    min_size, max_size = 18, 160
 
-    for size in range(72, 15, -4):
-        try:
-            font = (
-                ImageFont.truetype(str(font_file), size)
-                if font_file
-                else ImageFont.load_default()
-            )
-        except OSError:
-            continue
+    if font_str:
+        low, high = min_size, max_size
+        while low <= high:
+            mid = (low + high) // 2
+            try:
+                font = ImageFont.truetype(font_str, mid)
+            except OSError:
+                break
 
-        # Estimate characters per line from the average glyph width.
-        probe = draw.textlength("MMMMMMMMMM", font=font) / 10 or size * 0.6
-        per_line = max(6, int(max_width / probe))
+            lines, broken_word = _wrap_words(text, draw, font, max_width)
+            shaped = [shape_rtl(line) if line else "" for line in lines]
+            widest = max((draw.textlength(line, font=font) for line in shaped), default=0)
+            line_height = mid * 1.35
+            total_height = line_height * len(shaped)
 
-        lines: list[str] = []
-        for paragraph in text.split("\n"):
-            if paragraph.strip():
-                lines.extend(textwrap.wrap(paragraph, width=per_line) or [paragraph])
+            if not broken_word and widest <= max_width and total_height <= max_height:
+                chosen_font = font
+                chosen_lines = shaped
+                low = mid + 1
             else:
-                lines.append("")
-
-        shaped = [shape_rtl(line) if line else "" for line in lines]
-        widest = max((draw.textlength(line, font=font) for line in shaped), default=0)
-        line_height = size * 1.35
-        total_height = line_height * len(shaped)
-
-        if widest <= max_width and total_height <= max_height:
-            chosen_font, chosen_lines = font, shaped
-            break
-
-        if font_file is None:  # bitmap fallback cannot scale
-            chosen_font, chosen_lines = font, shaped
-            break
+                high = mid - 1
 
     if chosen_font is None:
         chosen_font = (
-            ImageFont.truetype(str(font_file), 18)
-            if font_file
+            ImageFont.truetype(font_str, min_size)
+            if font_str
             else ImageFont.load_default()
         )
-        chosen_lines = [shape_rtl(line) for line in textwrap.wrap(text, width=32)]
+        lines, _ = _wrap_words(text, draw, chosen_font, max_width)
+        chosen_lines = [shape_rtl(line) if line else "" for line in lines]
 
     size = getattr(chosen_font, "size", 18)
     line_height = size * 1.35
-    y = (CANVAS - line_height * len(chosen_lines)) / 2 - (18 if watermark else 0)
+    total_text_height = line_height * len(chosen_lines)
+    y = (CANVAS - total_text_height) / 2 - (18 if watermark else 0)
 
     for line in chosen_lines:
         if line:
             width = draw.textlength(line, font=chosen_font)
             x = (CANVAS - width) / 2
             # Outline keeps the text readable on any chat background.
+            stroke_width = max(2, int(size / 16))
             draw.text(
-                (x, y), line, font=chosen_font, fill=(255, 255, 255, 255),
-                stroke_width=max(2, size // 18), stroke_fill=(0, 0, 0, 255),
+                (x, y),
+                line,
+                font=chosen_font,
+                fill=(255, 255, 255, 255),
+                stroke_width=stroke_width,
+                stroke_fill=(0, 0, 0, 255),
             )
         y += line_height
 
     if watermark:
+        wm_size = max(16, min(26, int(size * 0.4)))
         try:
             wm_font = (
-                ImageFont.truetype(str(font_file), 26)
-                if font_file
+                ImageFont.truetype(font_str, wm_size)
+                if font_str
                 else ImageFont.load_default()
             )
         except OSError:
             wm_font = ImageFont.load_default()
         wm_width = draw.textlength(watermark, font=wm_font)
         draw.text(
-            ((CANVAS - wm_width) / 2, CANVAS - 46),
-            watermark, font=wm_font, fill=(170, 170, 170, 220),
-            stroke_width=2, stroke_fill=(0, 0, 0, 200),
+            ((CANVAS - wm_width) / 2, CANVAS - 44),
+            watermark,
+            font=wm_font,
+            fill=(170, 170, 170, 220),
+            stroke_width=2,
+            stroke_fill=(0, 0, 0, 200),
         )
 
     image.save(output, "WEBP", quality=95, lossless=True)

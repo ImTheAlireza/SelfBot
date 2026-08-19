@@ -221,9 +221,16 @@ def _find_font() -> Path | None:
     """Locate a Unicode-capable TTF for Persian rendering."""
     candidates = [
         Path(__file__).resolve().parents[3] / "assets" / "fonts" / "Vazirmatn-Regular.ttf",
+        Path(__file__).resolve().parents[3] / "assets" / "fonts" / "Vazirmatn-Bold.ttf",
         Path("assets/fonts/Vazirmatn-Regular.ttf"),
+        Path("assets/fonts/Vazirmatn-Bold.ttf"),
         Path("fonts/Vazirmatn-Regular.ttf"),
         Path("/usr/share/fonts/truetype/vazirmatn/Vazirmatn-Regular.ttf"),
+        Path("/usr/share/fonts/truetype/vazirmatn/Vazirmatn-Bold.ttf"),
+        Path("/usr/share/fonts/truetype/vazir/Vazir-Bold.ttf"),
+        Path("/usr/share/fonts/truetype/vazir/Vazir-Regular.ttf"),
+        Path("/usr/share/fonts/truetype/noto/NotoSansArabic-Bold.ttf"),
+        Path("/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf"),
         Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
     ]
     return next((p for p in candidates if p.is_file()), None)
@@ -632,10 +639,10 @@ def _scrape_tgju(html: str) -> dict[str, int]:
     for row in soup.find_all("tr", attrs={"data-market-nameslug": True}):
         slug = row.get("data-market-nameslug")
         raw = row.get("data-price")
-        if not slug or not raw:
+        if not isinstance(slug, str) or not isinstance(raw, str):
             continue
         try:
-            out[slug] = int(str(raw).replace(",", "")) // 10
+            out[slug] = int(raw.replace(",", "")) // 10
         except ValueError:
             continue
     return out

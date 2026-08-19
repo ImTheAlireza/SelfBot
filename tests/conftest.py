@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from selfbot.config import (
+    AIConfig,
     Config,
     SpamConfig,
     StickerConfig,
@@ -34,6 +35,7 @@ def config(tmp_path: Path) -> Config:
             config_path="", process_name="", log_file="", executable=""
         ),
         spam=SpamConfig(delay=0.0, limit=10, cooldown=0.0),
+        ai=AIConfig(rapidapi_key="test-rapidapi-key"),
         sudo_user_id=SUDO_ID,
         database_url=f"sqlite+aiosqlite:///{tmp_path / 'test.db'}",
         data_dir=tmp_path,
@@ -138,6 +140,16 @@ class FakeClient:
         self.deleted: list[tuple[Any, Any]] = []
         self.edited: list[tuple[Any, int, str]] = []
         self.entities: dict[Any, Any] = {}
+        self.admin_log_results: list[Any] = []
+        self.admin_log_requests: list[Any] = []
+
+    async def __call__(self, request: Any) -> Any:
+        self.admin_log_requests.append(request)
+        if self.admin_log_results:
+            return self.admin_log_results.pop(0)
+        from telethon import types
+
+        return types.channels.AdminLogResults(events=[], chats=[], users=[])
 
     async def send_file(self, chat_id: Any, file: Any, **kwargs: Any) -> FakeMessage:
         self.sent_files.append({"chat_id": chat_id, "file": file, **kwargs})
@@ -179,6 +191,7 @@ class FakeBot:
         self.timer_tasks: dict[str, asyncio.Task[Any]] = {}
         self.zip_queue: dict[int, list[Any]] = {}
         self.active_sticker_pack: dict[int, dict[str, Any]] = {}
+        self.challenge_tasks: dict[int, Any] = {}
         self.pending_confirmations: dict[Any, Any] = {}
         self.confirm_result = True
         self.confirm_prompts: list[str] = []

@@ -27,6 +27,7 @@ PRELUDE = (
     "reactions",
     "welcome",
     "stickers",
+    "challenge",
 )
 
 

@@ -12,7 +12,15 @@ from pathlib import Path
 
 from .errors import ConfigError
 
-__all__ = ["Config", "load_config"]
+__all__ = [
+    "AIConfig",
+    "Config",
+    "SpamConfig",
+    "StickerConfig",
+    "SupervisorConfig",
+    "TelegramConfig",
+    "load_config",
+]
 
 
 def _env(key: str, default: str = "") -> str:
@@ -89,11 +97,21 @@ class SpamConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class AIConfig:
+    rapidapi_key: str
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.rapidapi_key)
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     telegram: TelegramConfig
     sticker: StickerConfig
     supervisor: SupervisorConfig
     spam: SpamConfig
+    ai: AIConfig
 
     sudo_user_id: int
     database_url: str
@@ -135,6 +153,7 @@ class Config:
             f"sudo user    : {self.sudo_user_id}",
             f"prefix       : {self.command_prefix or '(none)'}",
             f"stickers     : {'enabled' if self.sticker.enabled else 'disabled'}",
+            f"ai (rapidapi): {'enabled' if self.ai.enabled else 'disabled'}",
             f"supervisor   : {'enabled' if self.supervisor.enabled else 'disabled'}",
             f"log channel  : {self.log_channel_id or '(none)'}",
         ]
@@ -221,6 +240,10 @@ def load_config(
         cooldown=max(0.0, _env_float("SPAM_COOLDOWN", 4)),
     )
 
+    ai = AIConfig(
+        rapidapi_key=_env("RAPIDAPI_KEY"),
+    )
+
     return Config(
         telegram=TelegramConfig(
             api_id=api_id,  # type: ignore[arg-type]
@@ -231,6 +254,7 @@ def load_config(
         sticker=sticker,
         supervisor=supervisor,
         spam=spam,
+        ai=ai,
         sudo_user_id=sudo_user_id,  # type: ignore[arg-type]
         database_url=database_url,
         data_dir=data_dir,
