@@ -130,10 +130,22 @@ def format_user_mention(user: Any) -> str:
     return f"[{name}](tg://user?id={user_id})" if user_id else f"@{username or name}"
 
 
+def is_reply_to_challenge(msg: Any, challenge_msg_id: int) -> bool:
+    """Return True if the message is a reply to the challenge message."""
+    if not msg:
+        return False
+    reply_msg_id = getattr(msg, "reply_to_msg_id", None)
+    if reply_msg_id is None:
+        reply_to = getattr(msg, "reply_to", None)
+        if reply_to is not None:
+            reply_msg_id = getattr(reply_to, "reply_to_msg_id", None)
+    return reply_msg_id == challenge_msg_id
+
+
 async def _scan_existing_mentions(
-    client: Any, chat_id: int, challenge_msg_id: int, limit: int = 3000
+    client: Any, chat_id: int, challenge_msg_id: int, limit: int = 5000
 ) -> tuple[set[int], set[str]]:
-    """Scan all messages in the chat since the challenge message for already tagged users."""
+    """Scan chat messages that specifically reply to the challenge message for already tagged users."""
     tagged_uids: set[int] = set()
     tagged_unames: set[str] = set()
 
@@ -143,9 +155,12 @@ async def _scan_existing_mentions(
         ):
             if not msg:
                 continue
-            uids, unames = extract_mentions(msg)
-            tagged_uids.update(uids)
-            tagged_unames.update(unames)
+
+            # Only check messages that are specifically replying to the challenge message
+            if is_reply_to_challenge(msg, challenge_msg_id) or getattr(msg, "id", None) == challenge_msg_id:
+                uids, unames = extract_mentions(msg)
+                tagged_uids.update(uids)
+                tagged_unames.update(unames)
     except Exception:
         logger.debug("Could not scan existing replies in chat %s", chat_id, exc_info=True)
 

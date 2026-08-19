@@ -191,7 +191,7 @@ async def test_startchallenge_and_stopchallenge_flow(bot, registry):
 
 @pytest.mark.asyncio
 async def test_startchallenge_scans_previous_tags_from_everyone(bot, registry):
-    """Scans all mentions since challenge msg from self and others to prevent duplicates."""
+    """Scans all mentions replying to the challenge msg from self and others to prevent duplicates."""
     chat_id = -100999
     challenge_msg = FakeMessage(id=100, text="Challenge post")
 
@@ -202,11 +202,18 @@ async def test_startchallenge_scans_previous_tags_from_everyone(bot, registry):
         DummyUser(user_id=4, first_name="NewUser", username="newuser", status=types.UserStatusRecently()),
     ]
 
-    # Prior messages from HOSein, Abolfazl, or ourselves
-    past_messages = [
-        FakeMessage(id=101, text="@hendona"),
-        FakeMessage(id=102, text="@reyhaneh362 @mina_saadatt"),
-    ]
+    # Prior messages from HOSein, Abolfazl, or ourselves replying to the challenge message
+    msg1 = FakeMessage(id=101, text="@hendona")
+    msg1.reply_to_msg_id = 100  # type: ignore[attr-defined]
+
+    msg2 = FakeMessage(id=102, text="@reyhaneh362 @mina_saadatt")
+    msg2.reply_to_msg_id = 100  # type: ignore[attr-defined]
+
+    # Unrelated message in group NOT replying to challenge
+    msg3 = FakeMessage(id=103, text="@someone_else")
+    msg3.reply_to_msg_id = 9999  # type: ignore[attr-defined]
+
+    past_messages = [msg1, msg2, msg3]
 
     async def iter_participants(_chat_id):
         for u in candidates:
@@ -234,10 +241,11 @@ async def test_startchallenge_scans_previous_tags_from_everyone(bot, registry):
 
     assert chat_id in bot.challenge_tasks
     state = bot.challenge_tasks[chat_id]
-    # hendona, reyhaneh362, mina_saadatt were already tagged in chat -> only newuser remains!
+    # hendona, reyhaneh362, mina_saadatt were already tagged on challenge -> only newuser remains!
     assert state.total_candidates == 1
     assert state.candidates[0].username == "newuser"
     assert state.tagged_usernames >= {"hendona", "reyhaneh362", "mina_saadatt"}
+    assert "someone_else" not in state.tagged_usernames
 
     await registry.dispatch(bot, FakeEvent(raw_text="stopchallenge", chat_id=chat_id), "stopchallenge")
 
