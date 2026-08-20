@@ -147,7 +147,7 @@ curl -Lo assets/fonts/Vazirmatn-Regular.ttf \
 ### Step 9 — Use the `gpt` command
 
 The command calls AnyAPI (OpenAI-compatible, `https://api.anyapi.ai/v1`), which
-routes to the model in `ANYAPI_MODEL` (default `openai/gpt-4o`). Add your key
+routes to the model in `ANYAPI_MODEL` (default `anthropic/claude-sonnet-5`). Add your key
 to `.env`:
 
 ```env

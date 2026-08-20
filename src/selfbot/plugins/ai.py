@@ -19,7 +19,7 @@ SYSTEM_PROMPT = "Format your replies with markdown when applicable"
 # Base URL and model come from config (ANYAPI_BASE_URL / ANYAPI_MODEL), so the
 # defaults here are only used when config values are absent.
 ANYAPI_DEFAULT_BASE_URL = "https://api.anyapi.ai/v1"
-ANYAPI_DEFAULT_MODEL = "openai/gpt-4o"
+ANYAPI_DEFAULT_MODEL = "anthropic/claude-sonnet-5"
 
 # RapidAPI — legacy fallback used when AnyAPI is rate-limited and a
 # RAPIDAPI_KEY is still configured.

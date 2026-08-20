@@ -11,6 +11,7 @@ from selfbot.config import AIConfig
 from selfbot.errors import ProviderError
 from selfbot.plugins.ai import (
     ANYAPI_DEFAULT_BASE_URL,
+    ANYAPI_DEFAULT_MODEL,
     BACKUP_RAPIDAPI_CHAT_URL,
     BACKUP_RAPIDAPI_GENERE,
     BACKUP_RAPIDAPI_HOST,
@@ -62,7 +63,7 @@ async def test_gpt_uses_anyapi_when_configured(bot, registry):
             rapidapi_key="",
             anyapi_key="sk-test-key",
             anyapi_base_url="https://api.anyapi.ai/v1",
-            anyapi_model="openai/gpt-4o",
+            anyapi_model=ANYAPI_DEFAULT_MODEL,
         ),
     )
     bot.http = StubHttp(
@@ -81,7 +82,7 @@ async def test_gpt_uses_anyapi_when_configured(bot, registry):
         "Content-Type": "application/json",
     }
     assert kwargs["json"] == {
-        "model": "openai/gpt-4o",
+        "model": ANYAPI_DEFAULT_MODEL,
         "temperature": 1,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},

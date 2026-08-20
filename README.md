@@ -134,11 +134,11 @@ which can deadlock when invoked by the process being restarted.
 ### AI
 | Command | Description |
 |---|---|
-| `gpt <prompt>` | Ask any AnyAPI model (default `openai/gpt-4o`) |
+| `gpt <prompt>` | Ask any AnyAPI model (default `anthropic/claude-sonnet-5`) |
 
 Set `ANYAPI_KEY` in `.env` to enable the `gpt` command (OpenAI-compatible,
 `https://api.anyapi.ai/v1`). Pick the model with `ANYAPI_MODEL` — default
-`openai/gpt-4o`. If AnyAPI is rate-limited or unavailable and a legacy
+`anthropic/claude-sonnet-5`. If AnyAPI is rate-limited or unavailable and a legacy
 `RAPIDAPI_KEY` is still configured, the command retries through RapidAPI.
 
 ### Messaging

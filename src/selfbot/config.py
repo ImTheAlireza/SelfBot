@@ -97,7 +97,7 @@ class SpamConfig:
 
 
 ANYAPI_DEFAULT_BASE_URL = "https://api.anyapi.ai/v1"
-ANYAPI_DEFAULT_MODEL = "openai/gpt-4o"
+ANYAPI_DEFAULT_MODEL = "anthropic/claude-sonnet-5"
 
 
 @dataclass(frozen=True, slots=True)
