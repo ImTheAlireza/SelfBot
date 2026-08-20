@@ -1,4 +1,4 @@
-"""Tests for the RapidAPI-backed GPT command."""
+"""Tests for the GPT command (AnyAPI primary, RapidAPI fallback)."""
 
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ from conftest import FakeEvent
 from selfbot.config import AIConfig
 from selfbot.errors import ProviderError
 from selfbot.plugins.ai import (
+    ANYAPI_DEFAULT_BASE_URL,
+    ANYAPI_DEFAULT_MODEL,
     BACKUP_RAPIDAPI_CHAT_URL,
     BACKUP_RAPIDAPI_GENERE,
     BACKUP_RAPIDAPI_HOST,
@@ -49,6 +51,129 @@ class SequenceHttp(StubHttp):
     async def request(self, method: str, url: str, **kwargs: Any) -> StubResponse:
         self.calls.append((method, url, kwargs))
         return self.responses.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_gpt_uses_anyapi_when_configured(bot, registry):
+    import dataclasses
+
+    bot.config = dataclasses.replace(
+        bot.config,
+        ai=AIConfig(
+            rapidapi_key="",
+            anyapi_key="sk-test-key",
+            anyapi_base_url="https://api.anyapi.ai/v1",
+            anyapi_model=ANYAPI_DEFAULT_MODEL,
+        ),
+    )
+    bot.http = StubHttp(
+        {"choices": [{"message": {"role": "assistant", "content": "Hi from AnyAPI!"}}]}
+    )
+    event = FakeEvent(raw_text="gpt hello there")
+
+    assert await registry.dispatch(bot, event, event.raw_text)
+
+    assert event.replies == ["🤖 Thinking…", "Hi from AnyAPI!"]
+    method, url, kwargs = bot.http.calls[0]
+    assert method == "POST"
+    assert url == f"{ANYAPI_DEFAULT_BASE_URL}/chat/completions"
+    assert kwargs["headers"] == {
+        "Authorization": "Bearer sk-test-key",
+        "Content-Type": "application/json",
+    }
+    assert kwargs["json"] == {
+        "model": ANYAPI_DEFAULT_MODEL,
+        "temperature": 1,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": "hello there"},
+        ],
+    }
+    assert kwargs["timeout"] == 120
+    assert kwargs["retries"] == 0
+
+
+@pytest.mark.asyncio
+async def test_gpt_uses_anyapi_base_url_and_model_from_config(bot, registry):
+    import dataclasses
+
+    bot.config = dataclasses.replace(
+        bot.config,
+        ai=AIConfig(
+            rapidapi_key="",
+            anyapi_key="sk-custom",
+            anyapi_base_url="https://custom.example.com/v1/",
+            anyapi_model="openai/gpt-4o-mini",
+        ),
+    )
+    bot.http = StubHttp({"choices": [{"message": {"content": "ok"}}]})
+    event = FakeEvent(raw_text="gpt x")
+
+    await registry.dispatch(bot, event, event.raw_text)
+
+    _, url, kwargs = bot.http.calls[0]
+    assert url == "https://custom.example.com/v1/chat/completions"
+    assert kwargs["json"]["model"] == "openai/gpt-4o-mini"
+
+
+@pytest.mark.asyncio
+async def test_gpt_falls_back_to_rapidapi_when_anyapi_rate_limited(bot, registry):
+    import dataclasses
+
+    bot.config = dataclasses.replace(
+        bot.config,
+        ai=AIConfig(
+            rapidapi_key="test-rapidapi-key",
+            anyapi_key="sk-test-key",
+        ),
+    )
+    bot.http = SequenceHttp(
+        StubResponse({"error": {"message": "Rate limit"}}, status=429),
+        StubResponse({"response": "RapidAPI fallback answer"}),
+    )
+    event = FakeEvent(raw_text="gpt explain this")
+
+    await registry.dispatch(bot, event, event.raw_text)
+
+    assert event.replies[-1] == "RapidAPI fallback answer"
+    assert len(bot.http.calls) == 2
+    assert bot.http.calls[0][1] == f"{ANYAPI_DEFAULT_BASE_URL}/chat/completions"
+    assert bot.http.calls[1][1] == RAPIDAPI_CHAT_URL
+
+
+@pytest.mark.asyncio
+async def test_gpt_surfaces_anyapi_401(bot, registry):
+    import dataclasses
+
+    bot.config = dataclasses.replace(
+        bot.config,
+        ai=AIConfig(
+            rapidapi_key="",
+            anyapi_key="sk-bad-key",
+        ),
+    )
+    bot.http = StubHttp({"error": {"message": "Invalid API key"}}, status=401)
+    event = FakeEvent(raw_text="gpt hello")
+
+    await registry.dispatch(bot, event, event.raw_text)
+
+    assert event.replies[0] == "🤖 Thinking…"
+    assert "rejected the API key" in event.replies[-1]
+
+
+@pytest.mark.asyncio
+async def test_gpt_requires_anyapi_or_rapidapi_key(bot, registry):
+    import dataclasses
+
+    bot.config = dataclasses.replace(
+        bot.config,
+        ai=AIConfig(rapidapi_key="", anyapi_key=""),
+    )
+    event = FakeEvent(raw_text="gpt What is AI?")
+
+    await registry.dispatch(bot, event, event.raw_text)
+
+    assert any("ANYAPI_KEY" in reply for reply in event.replies)
 
 
 @pytest.mark.asyncio

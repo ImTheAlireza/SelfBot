@@ -121,11 +121,20 @@ def render_sticker(text: str, output: Path, watermark: str = "") -> Path:
                 high = mid - 1
 
     if chosen_font is None:
-        chosen_font = (
-            ImageFont.truetype(font_str, min_size)
-            if font_str
-            else ImageFont.load_default()
-        )
+        if font_str:
+            try:
+                chosen_font = ImageFont.truetype(font_str, min_size)
+            except OSError:
+                logger.warning("Sticker font %r exists but cannot be loaded", font_str)
+                chosen_font = None
+        if chosen_font is None:
+            # Never silently fall back to PIL's tiny built-in font: the result
+            # is an unreadable 10px sticker. The Vazirmatn fonts ship in
+            # assets/fonts/, so this only happens if they were deleted.
+            raise RuntimeError(
+                "No usable font for stickers. Restore assets/fonts/ "
+                '(Vazirmatn-Regular.ttf) or reinstall with `pip install -e ".[full]"`.'
+            )
         lines, _ = _wrap_words(text, draw, chosen_font, max_width)
         chosen_lines = [shape_rtl(line) if line else "" for line in lines]
 

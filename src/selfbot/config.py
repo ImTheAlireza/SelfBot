@@ -96,13 +96,28 @@ class SpamConfig:
     cooldown: float
 
 
+ANYAPI_DEFAULT_BASE_URL = "https://api.anyapi.ai/v1"
+ANYAPI_DEFAULT_MODEL = "anthropic/claude-sonnet-5"
+
+
 @dataclass(frozen=True, slots=True)
 class AIConfig:
-    rapidapi_key: str
+    rapidapi_key: str = ""
+    anyapi_key: str = ""
+    anyapi_base_url: str = ANYAPI_DEFAULT_BASE_URL
+    anyapi_model: str = ANYAPI_DEFAULT_MODEL
 
     @property
     def enabled(self) -> bool:
-        return bool(self.rapidapi_key)
+        return bool(self.anyapi_key or self.rapidapi_key)
+
+    @property
+    def provider(self) -> str:
+        if self.anyapi_key:
+            return "anyapi"
+        if self.rapidapi_key:
+            return "rapidapi"
+        return "disabled"
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,7 +168,7 @@ class Config:
             f"sudo user    : {self.sudo_user_id}",
             f"prefix       : {self.command_prefix or '(none)'}",
             f"stickers     : {'enabled' if self.sticker.enabled else 'disabled'}",
-            f"ai (rapidapi): {'enabled' if self.ai.enabled else 'disabled'}",
+            f"ai: {self.ai.provider}",
             f"supervisor   : {'enabled' if self.supervisor.enabled else 'disabled'}",
             f"log channel  : {self.log_channel_id or '(none)'}",
         ]
@@ -242,6 +257,9 @@ def load_config(
 
     ai = AIConfig(
         rapidapi_key=_env("RAPIDAPI_KEY"),
+        anyapi_key=_env("ANYAPI_KEY"),
+        anyapi_base_url=_env("ANYAPI_BASE_URL") or ANYAPI_DEFAULT_BASE_URL,
+        anyapi_model=_env("ANYAPI_MODEL") or ANYAPI_DEFAULT_MODEL,
     )
 
     return Config(

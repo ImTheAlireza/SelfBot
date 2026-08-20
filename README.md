@@ -26,7 +26,7 @@ typing commands into any chat.
 
 | | |
 |---|---|
-| 🧠 **AI** | Ask GPT 5.4 High through ChatGPT API8 on RapidAPI with `gpt <prompt>`. |
+| 🧠 **AI** | Ask GPT-4o (or any AnyAPI model) with `gpt <prompt>`. |
 | 📁 **Files** | Zip/unzip with AES passwords, batch queues, rename, audio tag editing, PDF page extraction. |
 | ⏰ **Timers** | Live-updating countdowns that survive restarts. |
 | 🎨 **Stickers** | Render text to stickers and manage packs via a helper bot. |
@@ -88,7 +88,7 @@ Telegram, storage, logging, and process settings are environment-driven. See
 | `COMMAND_PREFIX` | | *(none)* | Set to `.` to require `.help` |
 | `STARTUP_NOTIFY` | | `me` | Online message target: `me`, `off`, or a chat ID |
 | `LOG_CHANNEL_ID` | | — | Mirror warnings/errors to a private channel |
-| `RAPIDAPI_KEY` | | — | RapidAPI key for the `gpt` command |
+| `ANYAPI_KEY` | | — | AnyAPI key for the `gpt` command (anyapi.ai) |
 | `SUPERVISOR_PROCESS` | | `selfbot` | Enables supervisor-backed status and logs |
 | `MAX_FILE_SIZE_MB` | | `512` | Ceiling on downloads and uploads |
 
@@ -134,10 +134,12 @@ which can deadlock when invoked by the process being restarted.
 ### AI
 | Command | Description |
 |---|---|
-| `gpt <prompt>` | Ask `GPT_5_4_high` through ChatGPT API8 on RapidAPI |
+| `gpt <prompt>` | Ask any AnyAPI model (default `anthropic/claude-sonnet-5`) |
 
-Set `RAPIDAPI_KEY` in `.env` to enable the `gpt` command. If ChatGPT API8
-returns HTTP 429, the command automatically retries through Adult GPT.
+Set `ANYAPI_KEY` in `.env` to enable the `gpt` command (OpenAI-compatible,
+`https://api.anyapi.ai/v1`). Pick the model with `ANYAPI_MODEL` — default
+`anthropic/claude-sonnet-5`. If AnyAPI is rate-limited or unavailable and a legacy
+`RAPIDAPI_KEY` is still configured, the command retries through RapidAPI.
 
 ### Messaging
 | Command | Description |
