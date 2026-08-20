@@ -146,13 +146,22 @@ curl -Lo assets/fonts/Vazirmatn-Regular.ttf \
 
 ### Step 9 — Use the `gpt` command
 
-The command is preconfigured to call `GPT_5_4_high` through ChatGPT API8 on
-RapidAPI. If its quota is exhausted, Adult GPT is used automatically as a
-backup. It does not require any `.env` settings. Start the bot and try:
+The command calls AnyAPI (OpenAI-compatible, `https://api.anyapi.ai/v1`), which
+routes to the model in `ANYAPI_MODEL` (default `openai/gpt-4o`). Add your key
+to `.env`:
+
+```env
+ANYAPI_KEY=sk-...
+```
+
+Start the bot and try:
 
 ```text
 gpt What is the meaning of life?
 ```
+
+If AnyAPI is rate-limited and you still have a `RAPIDAPI_KEY` set, the command
+automatically falls back to RapidAPI.
 
 ### Step 10 — Enable CI on GitHub
 

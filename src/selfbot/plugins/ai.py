@@ -1,4 +1,4 @@
-"""AI commands backed by the ChatGPT API8 service on RapidAPI."""
+"""AI commands backed by AnyAPI (OpenAI-compatible), with a RapidAPI fallback."""
 
 from __future__ import annotations
 
@@ -13,14 +13,34 @@ from ..utils.text import truncate
 logger = logging.getLogger(__name__)
 
 CATEGORY = "AI"
+SYSTEM_PROMPT = "Format your replies with markdown when applicable"
+
+# AnyAPI — primary provider (OpenAI-compatible /v1/chat/completions).
+# Base URL and model come from config (ANYAPI_BASE_URL / ANYAPI_MODEL), so the
+# defaults here are only used when config values are absent.
+ANYAPI_DEFAULT_BASE_URL = "https://api.anyapi.ai/v1"
+ANYAPI_DEFAULT_MODEL = "openai/gpt-4o"
+
+# RapidAPI — legacy fallback used when AnyAPI is rate-limited and a
+# RAPIDAPI_KEY is still configured.
 RAPIDAPI_HOST = "chatgpt-api8.p.rapidapi.com"
 RAPIDAPI_CHAT_URL = f"https://{RAPIDAPI_HOST}/chato"
 RAPIDAPI_MODEL = "GPT_5_4_high"
-SYSTEM_PROMPT = "Format your relies with markdown when applicable"
 
 BACKUP_RAPIDAPI_HOST = "adult-gpt.p.rapidapi.com"
 BACKUP_RAPIDAPI_CHAT_URL = f"https://{BACKUP_RAPIDAPI_HOST}/adultgpt"
 BACKUP_RAPIDAPI_GENERE = "ai-gf-1"
+
+# HTTP statuses that mean "try the next provider" instead of "user error".
+_FALLBACK_STATUSES = frozenset({408, 429, 502, 503, 504})
+
+
+class _ProviderStatusError(ProviderError):
+    """ProviderError that carries the HTTP status for fallback decisions."""
+
+    def __init__(self, message: str, status: int) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 @command(
@@ -31,11 +51,12 @@ BACKUP_RAPIDAPI_GENERE = "ai-gf-1"
     examples=("gpt What is the meaning of life?",),
 )
 async def cmd_gpt(ctx: Context) -> None:
-    """Ask GPT through RapidAPI, with an automatic quota fallback."""
-    api_key = getattr(ctx.config.ai, "rapidapi_key", "") if hasattr(ctx.config, "ai") else ""
-    if not api_key:
+    """Ask GPT through AnyAPI, falling back to RapidAPI when configured."""
+    ai = ctx.config.ai
+    if not ai.enabled:
         raise FeatureDisabledError(
-            "RapidAPI key is not configured. Set `RAPIDAPI_KEY` in your `.env`."
+            "No AI provider is configured. Set `ANYAPI_KEY` (or `RAPIDAPI_KEY`) "
+            "in your `.env`."
         )
 
     prompt = ctx.raw_args.strip()
@@ -44,11 +65,95 @@ async def cmd_gpt(ctx: Context) -> None:
 
     status = await ctx.reply("🤖 Thinking…")
     try:
-        answer = await _rapidapi_completion(ctx.bot.http, prompt=prompt, api_key=api_key)
+        if ai.anyapi_key:
+            try:
+                answer = await _anyapi_completion(
+                    ctx.bot.http,
+                    prompt=prompt,
+                    api_key=ai.anyapi_key,
+                    base_url=ai.anyapi_base_url,
+                    model=ai.anyapi_model,
+                )
+            except ProviderError as exc:
+                if isinstance(exc, _ProviderStatusError) and exc.status in _FALLBACK_STATUSES:
+                    if ai.rapidapi_key:
+                        logger.warning(
+                            "AnyAPI unavailable (HTTP %s); falling back to RapidAPI", exc.status
+                        )
+                        answer = await _rapidapi_completion(
+                            ctx.bot.http, prompt=prompt, api_key=ai.rapidapi_key
+                        )
+                    else:
+                        raise
+                else:
+                    raise
+        else:
+            answer = await _rapidapi_completion(ctx.bot.http, prompt=prompt, api_key=ai.rapidapi_key)
     finally:
         await _delete_status(status)
 
     await ctx.reply(answer)
+
+
+# --------------------------------------------------------------------------
+# AnyAPI (OpenAI-compatible)
+# --------------------------------------------------------------------------
+
+
+async def _anyapi_completion(
+    http: Any,
+    *,
+    prompt: str,
+    api_key: str,
+    base_url: str,
+    model: str,
+) -> str:
+    """Request one chat completion from AnyAPI and return its text."""
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    response = await http.request(
+        "POST",
+        url,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model,
+            "temperature": 1,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+        },
+        timeout=120,
+        # A retry after an uncertain timeout can duplicate a billable request.
+        retries=0,
+    )
+
+    try:
+        payload = await response.json(content_type=None)
+    except Exception as exc:
+        raise _ProviderStatusError(
+            f"AnyAPI sent an invalid response (HTTP {response.status}).", response.status
+        ) from exc
+
+    if response.status >= 400:
+        raise _ProviderStatusError(
+            _format_provider_error(payload, response.status, "AnyAPI"), response.status
+        )
+
+    if isinstance(payload, Mapping) and payload.get("error"):
+        raise _ProviderStatusError(
+            _format_provider_error(payload, response.status, "AnyAPI"),
+            response.status or 400,
+        )
+
+    return _extract_answer(payload, "AnyAPI")
+
+
+# --------------------------------------------------------------------------
+# RapidAPI (legacy)
+# --------------------------------------------------------------------------
 
 
 async def _rapidapi_completion(http: Any, *, prompt: str, api_key: str) -> str:
@@ -70,35 +175,34 @@ async def _rapidapi_completion(http: Any, *, prompt: str, api_key: str) -> str:
             ],
         },
         timeout=120,
-        # A retry after an uncertain timeout can duplicate a billable request.
         retries=0,
     )
 
     try:
         payload = await response.json(content_type=None)
     except Exception as exc:
-        if response.status == 429:
+        if response.status in _FALLBACK_STATUSES:
             logger.warning("Primary RapidAPI quota reached; trying the backup API")
             return await _backup_rapidapi_completion(http, prompt=prompt, api_key=api_key)
         raise ProviderError(
             f"RapidAPI sent an invalid response (HTTP {response.status})."
         ) from exc
 
-    if response.status == 429:
+    if response.status in _FALLBACK_STATUSES:
         logger.warning("Primary RapidAPI quota reached; trying the backup API")
         return await _backup_rapidapi_completion(http, prompt=prompt, api_key=api_key)
 
     if response.status >= 400:
-        raise ProviderError(_format_rapidapi_error(payload, response.status))
+        raise ProviderError(_format_provider_error(payload, response.status, "RapidAPI"))
 
     if isinstance(payload, Mapping) and payload.get("error"):
-        raise ProviderError(_format_rapidapi_error(payload, response.status))
+        raise ProviderError(_format_provider_error(payload, response.status, "RapidAPI"))
 
-    return _extract_answer(payload)
+    return _extract_answer(payload, "RapidAPI")
 
 
 async def _backup_rapidapi_completion(http: Any, *, prompt: str, api_key: str) -> str:
-    """Use Adult GPT when the primary RapidAPI plan returns HTTP 429."""
+    """Use Adult GPT when the primary RapidAPI plan returns an error status."""
     response = await http.request(
         "POST",
         BACKUP_RAPIDAPI_CHAT_URL,
@@ -128,24 +232,29 @@ async def _backup_rapidapi_completion(http: Any, *, prompt: str, api_key: str) -
         ) from exc
 
     if response.status >= 400:
-        raise ProviderError(_format_rapidapi_error(payload, response.status))
+        raise ProviderError(_format_provider_error(payload, response.status, "RapidAPI"))
 
     if isinstance(payload, Mapping) and payload.get("error"):
-        raise ProviderError(_format_rapidapi_error(payload, response.status))
+        raise ProviderError(_format_provider_error(payload, response.status, "RapidAPI"))
 
-    return _extract_answer(payload)
+    return _extract_answer(payload, "RapidAPI")
 
 
-def _extract_answer(payload: Any) -> str:
+# --------------------------------------------------------------------------
+# Response parsing & error formatting
+# --------------------------------------------------------------------------
+
+
+def _extract_answer(payload: Any, provider: str = "AnyAPI") -> str:
     """Extract text from common chat-completion response shapes."""
     if isinstance(payload, str):
         answer = payload.strip()
         if answer:
             return answer
-        raise ProviderError("RapidAPI returned an empty completion.")
+        raise ProviderError(f"{provider} returned an empty completion.")
 
     if not isinstance(payload, Mapping):
-        raise ProviderError("RapidAPI returned an unexpected response.")
+        raise ProviderError(f"{provider} returned an unexpected response.")
 
     choices = payload.get("choices")
     if isinstance(choices, list) and choices and isinstance(choices[0], Mapping):
@@ -174,11 +283,11 @@ def _extract_answer(payload: Any) -> str:
     data = payload.get("data")
     if isinstance(data, (str, Mapping)):
         try:
-            return _extract_answer(data)
+            return _extract_answer(data, provider)
         except ProviderError:
             pass
 
-    raise ProviderError("RapidAPI returned an empty completion.")
+    raise ProviderError(f"{provider} returned an empty completion.")
 
 
 def _content_text(content: Any) -> str:
@@ -196,8 +305,8 @@ def _content_text(content: Any) -> str:
     return "\n".join(pieces).strip()
 
 
-def _format_rapidapi_error(payload: Any, status: int) -> str:
-    """Turn a RapidAPI error response into a short, actionable message."""
+def _format_provider_error(payload: Any, status: int, provider: str) -> str:
+    """Turn a provider error response into a short, actionable message."""
     detail = ""
     if isinstance(payload, Mapping):
         error = payload.get("error")
@@ -216,19 +325,24 @@ def _format_rapidapi_error(payload: Any, status: int) -> str:
                     break
 
     friendly = {
-        401: "RapidAPI rejected the API key.",
-        403: "RapidAPI denied access. Check the API subscription.",
-        408: "The RapidAPI request timed out. Try again.",
-        429: "The RapidAPI quota or rate limit was reached. Try again later.",
-        502: "The AI service behind RapidAPI is temporarily unavailable.",
-        503: "The AI service behind RapidAPI is temporarily unavailable.",
+        401: f"{provider} rejected the API key.",
+        403: f"{provider} denied access. Check the subscription or model access.",
+        408: f"The {provider} request timed out. Try again.",
+        429: f"The {provider} quota or rate limit was reached. Try again later.",
+        502: f"The AI service behind {provider} is temporarily unavailable.",
+        503: f"The AI service behind {provider} is temporarily unavailable.",
     }.get(status)
     if friendly:
         return friendly
 
     if detail:
-        return f"RapidAPI error (HTTP {status}): {truncate(detail, 300)}"
-    return f"RapidAPI returned HTTP {status}."
+        return f"{provider} error (HTTP {status}): {truncate(detail, 300)}"
+    return f"{provider} returned HTTP {status}."
+
+
+def _format_rapidapi_error(payload: Any, status: int) -> str:
+    """Backwards-compatible wrapper used by older callers/tests."""
+    return _format_provider_error(payload, status, "RapidAPI")
 
 
 async def _delete_status(message: Any) -> None:
