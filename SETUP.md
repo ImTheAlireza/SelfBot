@@ -134,7 +134,10 @@ watch a live countdown. Stop the bot with `Ctrl-C`.
 
 ### Step 8 — Persian text in PDFs and stickers
 
-Without this, `topdf fa` and Persian `stick` text render as boxes:
+The Vazirmatn fonts are **bundled** in `assets/fonts/`, so `topdf fa` and
+Persian `stick` text render correctly out of the box — no download needed.
+
+Only do this if you want a custom look (overwrites the bundled font):
 
 ```bash
 curl -Lo assets/fonts/Vazirmatn-Regular.ttf \
