@@ -154,6 +154,23 @@ class CommandRegistry:
 
         return decorator
 
+    # -- unregister --------------------------------------------------------
+
+    def unregister(self, name: str) -> Command | None:
+        """Remove a command (and its aliases). Returns it, or None.
+
+        Used by the external plugin manager to unload or reload plugins.
+        Safe to call on an unknown name.
+        """
+        key = name.lower()
+        command = self._commands.pop(key, None)
+        if command is None:
+            return None
+        for alias in command.aliases:
+            self._commands.pop(alias.lower(), None)
+        self._by_name.pop(command.name, None)
+        return command
+
     # -- lookup ------------------------------------------------------------
 
     def get(self, name: str) -> Command | None:

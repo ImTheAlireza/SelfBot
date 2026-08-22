@@ -1335,10 +1335,19 @@ class Database:
             )
 
     async def set_plugin_enabled(self, name: str, enabled: bool) -> int:
-        return await self.execute(
-            "UPDATE plugin_state SET enabled = %s WHERE name = %s",
-            (1 if enabled else 0, name),
+        exists = await self.fetch_one(
+            "SELECT 1 FROM plugin_state WHERE name = %s", (name,)
         )
+        if exists:
+            return await self.execute(
+                "UPDATE plugin_state SET enabled = %s WHERE name = %s",
+                (1 if enabled else 0, name),
+            )
+        await self.execute(
+            "INSERT INTO plugin_state (name, source, enabled) VALUES (%s, %s, %s)",
+            (name, "unknown", 1 if enabled else 0),
+        )
+        return 1
 
     async def delete_plugin_state(self, name: str) -> int:
         return await self.execute(

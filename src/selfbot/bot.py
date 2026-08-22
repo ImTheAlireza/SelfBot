@@ -28,6 +28,7 @@ from .registry import CommandRegistry
 from .registry import registry as global_registry
 from .security import SecretBox
 from .services.metrics import Metrics
+from .services.plugins import PluginManager
 from .utils.files import cleanup_old_files
 from .utils.http import close_client, get_client
 from .utils.text import TELEGRAM_LIMIT, chunk_text
@@ -188,6 +189,17 @@ class SelfBot:
 
         self._health_runner = await start_health_server(self)
 
+        # External plugins (DATA_DIR/plugins) load after the built-ins so they
+        # can override or supplement core commands.
+        self.plugins = PluginManager(self, self.config.plugins_path)
+        external = await self.plugins.load_all()
+        if external:
+            logger.info(
+                "Loaded %d external plugin(s): %s",
+                len(external),
+                ", ".join(p.name for p in external),
+            )
+
         restored, expired = await self._restore_timers()
         self._spawn(self._janitor(), name="janitor")
         self._spawn(self._welcome_watcher(), name="welcome-watcher")
@@ -319,6 +331,11 @@ class SelfBot:
             await self._telegram_log_handler.stop()
             logging.getLogger().removeHandler(self._telegram_log_handler)
 
+        if self.plugins is not None:
+            try:
+                await self.plugins.shutdown()
+            except Exception:
+                logger.debug("Plugin shutdown error", exc_info=True)
         await self.metrics.stop()
         if self._health_runner is not None:
             from .plugins.health import stop_health_server
