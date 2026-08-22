@@ -20,18 +20,22 @@
 
 ## What it does
 
-44 commands for AI, file manipulation, timers, stickers, QR codes, weather,
-dictionaries and chat automation — all driven from your own Telegram account by
-typing commands into any chat.
+60+ commands for AI (with conversation memory, multiple providers and
+summarization), file manipulation, timers, stickers, QR codes, weather,
+dictionaries, search, backups and chat automation — all driven from your own
+Telegram account by typing commands into any chat.
 
 | | |
 |---|---|
-| 🧠 **AI** | Ask GPT-4o (or any AnyAPI model) with `gpt <prompt>`. |
+| 🧠 **AI** | Ask any OpenAI-compatible model with `gpt`, with per-chat memory, reply/edit mode, summarization, model selection and provider management. |
 | 📁 **Files** | Zip/unzip with AES passwords, batch queues, rename, audio tag editing, PDF page extraction. |
 | ⏰ **Timers** | Live-updating countdowns that survive restarts. |
 | 🎨 **Stickers** | Render text to stickers and manage packs via a helper bot. |
 | 🔲 **Utilities** | QR generate/decode, text→PDF (English + Persian), weather, dictionary with audio, IRR exchange rates. |
 | ⚡ **Automation** | Quick-reply shortcuts, per-channel auto-reactions, per-chat auto-replies, per-chat welcome messages, controlled bulk deletion. |
+| 🔍 **Search & data** | Search chat history by text/sender/date/media, and export/import backups of settings, quick replies, timers and more. |
+| 🧩 **Plugins** | Drop Python modules into a plugins directory to add commands without touching the core. |
+| 🩺 **Observability** | In-chat health report (tasks, memory, DB, API failures) and an optional `/healthz` endpoint. |
 
 ---
 
@@ -88,7 +92,9 @@ Telegram, storage, logging, and process settings are environment-driven. See
 | `COMMAND_PREFIX` | | *(none)* | Set to `.` to require `.help` |
 | `STARTUP_NOTIFY` | | `me` | Online message target: `me`, `off`, or a chat ID |
 | `LOG_CHANNEL_ID` | | — | Mirror warnings/errors to a private channel |
-| `ANYAPI_KEY` | | — | AnyAPI key for the `gpt` command (anyapi.ai) |
+| `ANYAPI_KEY` / `BLUESMINDS_API_KEY` / `RAPIDAPI_KEY` | | — | AI keys seeded into the DB on first run; managed afterward via `provider` |
+| `HEALTH_PORT` / `HEALTH_BIND` | | disabled / `127.0.0.1` | Enable the `/healthz` HTTP endpoint |
+| `PLUGINS_DIR` | | `DATA_DIR/plugins` | Directory for external plugins |
 | `SUPERVISOR_PROCESS` | | `selfbot` | Enables supervisor-backed status and logs |
 | `MAX_FILE_SIZE_MB` | | `512` | Ceiling on downloads and uploads |
 
@@ -118,7 +124,9 @@ Commands are typed as plain messages from your own account. Set
 | `ping` | Round-trip latency |
 | `whoami` | Your user ID, role and the current chat ID |
 | `status` | Uptime and runtime counters |
+| `health [metrics]` | 👑 Tasks, memory, DB, AI and recent API failures |
 | `self on\|off\|restart\|status\|logs\|diag` | 👑 Process control and supervisor troubleshooting |
+| `plugin list\|load\|reload\|unload\|enable\|disable\|install\|path` | 👑 Manage external plugins |
 
 `self restart` directly replaces the current Python process while preserving
 its PID and environment. It deliberately does not call `supervisorctl restart`,
@@ -130,17 +138,33 @@ which can deadlock when invoked by the process being restarted.
 | `setadmin <id\|@user>` | Let another user run commands |
 | `remadmin <id>` | Revoke access |
 | `adminlist` | List authorised users |
+| `backup [--include-secrets]` | 👑 Export all settings/data as JSON (keys redacted by default) |
+| `restore [--force]` | 👑 Restore from a replied backup file |
 
 ### AI
 | Command | Description |
 |---|---|
-| `gpt <prompt>` | Ask any AnyAPI model (default `anthropic/claude-sonnet-5`) |
+| `gpt <prompt>` | Ask an AI model. Reply to a message to feed it as context. Providers fall over automatically on quota errors. |
+| `gptedit [instruction]` | 👑 Rewrite one of **your own** messages with AI, editing it in place |
+| `gptmemory on\|off\|clear\|turns\|status` | Per-chat conversation memory |
+| `summarize [n] [--lang en\|fa] [--brief\|--detailed]` | Summarize a replied message, document or last `n` messages |
+| `gptmodel list\|set\|clear\|current` | 👑 Discover and choose models |
+| `aistatus [test <name>]` | 👑 Provider health, cooldowns and live connectivity test |
+| `provider add\|list\|default\|enable\|disable\|remove\|test` | 👑 Manage OpenAI-compatible providers stored in the database |
 
-Set `ANYAPI_KEY` in `.env` to enable the `gpt` command (OpenAI-compatible,
-`https://api.anyapi.ai/v1`). Pick the model with `ANYAPI_MODEL` — default
-`anthropic/claude-sonnet-5`. If `BLUESMINDS_API_KEY` is configured, the command
-tries BluesMinds next when AnyAPI is rate-limited; if that is also unavailable
-and `RAPIDAPI_KEY` is configured, it retries through RapidAPI.
+AI providers and API keys are stored **in the database** (encrypted at rest),
+not in `.env`. To add one:
+
+```
+provider add openai https://api.openai.com/v1 sk-your-key gpt-4o-mini
+gptmodel set openai/gpt-4o-mini
+```
+
+Keys still present in `ANYAPI_KEY` / `BLUESMINDS_API_KEY` / `RAPIDAPI_KEY` are
+seeded into the database automatically on first start, so existing
+deployments keep working. When a provider returns a quota/rate-limit error it
+is temporarily skipped with exponential back-off; `aistatus` shows who is
+cooling down.
 
 ### Messaging
 | Command | Description |
@@ -151,6 +175,7 @@ and `RAPIDAPI_KEY` is configured, it retries through RapidAPI.
 | `info [user]` | User details and profile photo (reply, mention, or yourself) |
 | `qreply set\|remove\|list\|info` | Manage `-alias` shortcuts |
 | `-<alias>` | Expand a quick reply in place |
+| `search <text> [--from X] [--since D] [--until D] [--type media] [--limit N]` | Search this chat by text, sender, date or media |
 
 `del` always operates on the chat where the command was sent and can never
 select another chat. Without `-me`, it targets messages from everyone that your
@@ -217,14 +242,19 @@ src/selfbot/
 ├── config.py          Typed config loaded from the environment
 ├── db.py              Async SQLite/MySQL layer + repositories
 ├── registry.py        Command registry, validation, dispatch
+├── security.py        Fernet encryption for secrets at rest
 ├── errors.py          Exception hierarchy
 ├── logging_setup.py   Console, rotating file and Telegram sinks
-├── services/          Supervisor integration
+├── services/
+│   ├── ai.py          AIManager: provider routing, cooldown, memory
+│   ├── metrics.py     Counters, gauges, API-failure ring buffer
+│   ├── plugins.py     External plugin loader/lifecycle
+│   └── supervisor.py  Process-manager integration
 ├── utils/             HTTP client, text helpers, filesystem safety
-└── plugins/           One module per feature area
+└── plugins/           One module per feature area (auto-discovered)
 ```
 
-**Adding a command** — drop a module in `plugins/`; it is auto-discovered:
+**Adding a bundled command** — drop a module in `plugins/`; it is auto-discovered:
 
 ```python
 from ..registry import Context, command
@@ -239,6 +269,36 @@ Argument rules (`min_args`, `max_args`, `requires_reply`, `sudo_only`) are
 enforced by the dispatcher before your handler runs, so a misuse produces a
 usage hint rather than a traceback.
 
+### External plugins
+
+Drop a `.py` file (or a package directory) into `DATA_DIR/plugins` and it is
+loaded on startup — no core changes required. Plugins register commands with
+the same decorator and may optionally expose metadata and lifecycle hooks:
+
+```python
+from selfbot.registry import command, Context
+
+PLUGIN = type("PluginMeta", (), {"name": "hello", "version": "1.0"})()
+
+async def setup(bot):        # optional: spawn background tasks here
+    bot._spawn(my_worker(bot), name="hello-worker")
+
+async def teardown(bot):     # optional: clean up on unload/reload
+    ...
+
+@command("hello", category="Plugins", usage="hello <name>", min_args=1)
+async def cmd_hello(ctx: Context) -> None:
+    await ctx.reply(f"Hello, {ctx.args[0]}!")
+```
+
+Manage them in chat: `plugin list`, `plugin load <path>`, `plugin reload <name>`,
+`plugin enable|disable <name>`, `plugin unload <name>`, and
+`plugin install <git-url|pip-spec> --trust`.
+
+> **Warning:** external plugins run with full access to your Telegram account
+> and the host. Only install code you have reviewed — `install` requires
+> `--trust`.
+
 ---
 
 ## Development
@@ -246,7 +306,7 @@ usage hint rather than a traceback.
 ```bash
 pip install -e ".[dev,full]"
 
-pytest                      # 291 tests
+pytest                      # 398 tests
 pytest --cov=selfbot        # with coverage
 ruff check src tests        # lint
 mypy src/selfbot            # type check
