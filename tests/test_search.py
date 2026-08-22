@@ -29,6 +29,13 @@ class _Sender:
 
 
 @dataclass
+class _Peer:
+    channel_id: int | None = None
+    chat_id: int | None = None
+    user_id: int | None = None
+
+
+@dataclass
 class _Msg:
     id: int
     raw_text: str = ""
@@ -46,9 +53,31 @@ class _Msg:
     gif: Any = None
     web_preview: Any = None
     media: Any = None
+    peer_id: _Peer = field(default_factory=lambda: _Peer(channel_id=1234567890))
 
     async def get_sender(self) -> _Sender:
         return _Sender()
+
+
+class _GlobalClient:
+    """Fake supporting entity=None global search."""
+
+    def __init__(self, messages: list[_Msg], chat_title: str = "My Channel") -> None:
+        self.messages = messages
+        self.chat_title = chat_title
+        self.calls: list[dict[str, Any]] = []
+
+    async def iter_messages(self, chat_id: Any, **kwargs: Any):
+        self.calls.append({"chat_id": chat_id, **kwargs})
+        for m in self.messages:
+            yield m
+
+    async def get_entity(self, chat_id: int):
+        return type("E", (), {"title": self.chat_title, "username": None, "first_name": "", "last_name": ""})()
+
+    async def iter_dialogs(self, limit: int = 0):
+        dialog = type("D", (), {"id": -1001234567890, "name": self.chat_title})()
+        yield dialog
 
 
 class _Client:
@@ -148,3 +177,85 @@ def test_media_types_cover_delete_types() -> None:
     # The search types should at least know the kinds used by the del command.
     for key in ("photo", "video", "voice", "audio", "document", "sticker", "gif"):
         assert key in MEDIA_TYPES.values()
+
+
+# --------------------------------------------------------------------------
+# Global search (--global)
+# --------------------------------------------------------------------------
+
+
+async def test_global_search_searches_entity_none(bot) -> None:
+    msgs = [_Msg(id=1, raw_text="invoice in another chat")]
+    client = _GlobalClient(msgs)
+    bot.client = client
+    event = FakeEvent(raw_text="search invoice --global")
+    await bot.registry.dispatch(bot, event, "search invoice --global")
+
+    assert client.calls, "global search should issue a query"
+    assert client.calls[0]["chat_id"] is None
+    assert client.calls[0]["search"] == "invoice"
+    text = "\n".join(event.replies)
+    assert "global result" in text
+    assert "invoice in another chat" in text
+    # Result must name the source chat and link to it.
+    assert "My Channel" in text
+    assert "t.me/c/1234567890/1" in text
+
+
+async def test_global_search_requires_query(bot) -> None:
+    event = FakeEvent(raw_text="search --global")
+    await bot.registry.dispatch(bot, event, "search --global")
+    assert any("needs a search term" in r for r in event.replies)
+
+
+async def test_global_search_applies_since_filter(bot) -> None:
+    old = _Msg(id=1, raw_text="old match", date=datetime(2020, 1, 1, tzinfo=timezone.utc))
+    new = _Msg(id=2, raw_text="new match", date=datetime(2026, 6, 1, tzinfo=timezone.utc))
+    bot.client = _GlobalClient([old, new])
+    event = FakeEvent(raw_text="search match --global --since 2026-01-01")
+    await bot.registry.dispatch(bot, event, "search match --global --since 2026-01-01")
+    text = "\n".join(event.replies)
+    assert "new match" in text
+    assert "old match" not in text
+
+
+async def test_global_search_no_results(bot) -> None:
+    bot.client = _GlobalClient([])
+    event = FakeEvent(raw_text="search nothing --global")
+    await bot.registry.dispatch(bot, event, "search nothing --global")
+    assert any("No messages matched" in r for r in event.replies)
+
+
+async def test_global_search_media_only(bot) -> None:
+    msgs = [
+        _Msg(id=1, raw_text="", photo=object(), media=True),
+        _Msg(id=2, raw_text="text only"),
+    ]
+    bot.client = _GlobalClient(msgs)
+    event = FakeEvent(raw_text="search --global --type photos")
+    await bot.registry.dispatch(bot, event, "search --global --type photos")
+    text = "\n".join(event.replies)
+    assert "global result" in text
+    assert "text only" not in text
+
+
+async def test_global_uses_from_me_filter(bot) -> None:
+    msgs = [_Msg(id=1, raw_text="mine")]
+    client = _GlobalClient(msgs)
+    bot.client = client
+    event = FakeEvent(raw_text="search mine --global --from me")
+    await bot.registry.dispatch(bot, event, "search mine --global --from me")
+    assert client.calls[0]["from_user"] == "me"
+
+
+async def test_chat_id_of_peer_types() -> None:
+    from selfbot.plugins.search import _chat_id_of
+
+    m = type("M", (), {"peer_id": type("P", (), {"channel_id": 42})()})()
+    assert _chat_id_of(m) == -10042
+
+    m = type("M", (), {"peer_id": type("P", (), {"chat_id": 99})()})()
+    assert _chat_id_of(m) == -99
+
+    m = type("M", (), {"peer_id": type("P", (), {"user_id": 7})()})()
+    assert _chat_id_of(m) == 7

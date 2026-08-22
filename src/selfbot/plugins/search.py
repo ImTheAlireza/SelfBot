@@ -1,4 +1,4 @@
-"""Search the current chat by text, sender, date range or media type."""
+"""Search the current chat — or the whole account with --global."""
 
 from __future__ import annotations
 
@@ -59,16 +59,21 @@ def _parse_date(value: str, *, end: bool = False) -> datetime:
     category=CATEGORY,
     usage=(
         "search <text> [--from <id|@username|me>] [--since YYYY-MM-DD] "
-        "[--until YYYY-MM-DD] [--type <media>] [--limit N]"
+        "[--until YYYY-MM-DD] [--type <media>] [--limit N] [--global]"
     ),
     examples=(
         "search invoice",
         "search --from @durov --since 2026-01-01",
-        "search --type photos --limit 10",
+        "search contract --global --limit 30",
+        "search --type photos --global",
     ),
 )
 async def cmd_search(ctx: Context) -> None:
-    """Search the current chat history by text, sender, date or media type."""
+    """Search chat history by text, sender, date or media type.
+
+    Without ``--global`` only the current chat is searched. ``--global``
+    searches every private chat, group and channel in the account.
+    """
     tokens, flags = _parse_args(ctx.args)
 
     text = " ".join(tokens).strip()
@@ -76,6 +81,7 @@ async def cmd_search(ctx: Context) -> None:
     since = flags.get("since")
     until = flags.get("until")
     media = flags.get("type")
+    global_search = "--global" in ctx.args
     try:
         limit = min(int(flags.get("limit", "20")), 100)
     except ValueError as exc:
@@ -83,11 +89,16 @@ async def cmd_search(ctx: Context) -> None:
     if limit < 1:
         raise ValidationError("`--limit` must be at least 1.")
 
+    if global_search and not (text or media or sender):
+        raise UsageError(
+            "`--global` needs a search term, `--type media`, or `--from <who>`."
+        )
+
     if not (text or sender or since or until or media):
         raise UsageError(
             "Tell me what to look for.\n"
             "Usage: `search <text> [--from X] [--since D] [--until D] "
-            "[--type media] [--limit N]`"
+            "[--type media] [--limit N] [--global]`"
         )
 
     if media and media not in MEDIA_TYPES:
@@ -107,28 +118,37 @@ async def cmd_search(ctx: Context) -> None:
     since_dt = _parse_date(since) if since else None
     until_dt = _parse_date(until, end=True) if until else None
 
-    status = await ctx.reply("🔍 Searching…")
+    status = await ctx.reply(
+        "🌍 Searching across all chats…" if global_search else "🔍 Searching…"
+    )
 
     attribute = MEDIA_TYPES.get(media) if media else None
-    found: list[Any] = []
 
+    found: Any
     try:
-        async for message in ctx.client.iter_messages(
-            ctx.chat_id,
-            search=text or None,
-            from_user=from_user,
-            offset_date=until_dt,
-            limit=1000,
-        ):
-            if since_dt and message.date < since_dt:
-                continue
-            if attribute and not getattr(message, attribute, None):
-                continue
-            found.append(message)
-            if len(found) >= limit:
-                break
+        if global_search:
+            found = await _search_global(
+                ctx,
+                text=text,
+                from_user=from_user,
+                since_dt=since_dt,
+                until_dt=until_dt,
+                attribute=attribute,
+                limit=limit,
+            )
+        else:
+            found = await _search_local(
+                ctx,
+                text=text,
+                from_user=from_user,
+                since_dt=since_dt,
+                until_dt=until_dt,
+                attribute=attribute,
+                limit=limit,
+            )
     except Exception as exc:
-        await ctx.bot.edit(status, f"❌ Search failed: `{type(exc).__name__}: {exc}`")
+        await _delete_status(status)
+        await ctx.reply(f"❌ Search failed: `{type(exc).__name__}: {exc}`")
         return
 
     if not found:
@@ -136,15 +156,26 @@ async def cmd_search(ctx: Context) -> None:
         await ctx.reply("ℹ️ No messages matched.")
         return
 
-    lines = [f"🔍 **{len(found)} result(s)**\n"]
-    for message in found[:limit]:
-        snippet = _snippet(message)
-        sender_name = await _sender_name(message)
-        when = message.date.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
-        link = _message_link(ctx.chat_id, message.id)
-        lines.append(
-            f"• **{sender_name}** · `{when}` · [go]({link})\n  {snippet}"
-        )
+    if global_search:
+        lines = [f"🌍 **{len(found)} global result(s)**\n"]
+        for message, chat_title, chat_id in found[:limit]:
+            snippet = _snippet(message)
+            sender_name = await _sender_name(message)
+            when = message.date.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
+            link = _message_link(chat_id, message.id)
+            lines.append(
+                f"• **{chat_title}** · {sender_name} · `{when}` · [go]({link})\n  {snippet}"
+            )
+    else:
+        lines = [f"🔍 **{len(found)} result(s)**\n"]
+        for message in found[:limit]:
+            snippet = _snippet(message)
+            sender_name = await _sender_name(message)
+            when = message.date.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
+            link = _message_link(ctx.chat_id, message.id)
+            lines.append(
+                f"• **{sender_name}** · `{when}` · [go]({link})\n  {snippet}"
+            )
     await status.delete()
     await ctx.reply("\n".join(lines))
 
@@ -158,11 +189,150 @@ async def _delete_status(message: Any) -> None:
         logger.debug("Could not delete the search status message", exc_info=True)
 
 
+async def _search_local(
+    ctx: Context,
+    *,
+    text: str,
+    from_user: Any,
+    since_dt: datetime | None,
+    until_dt: datetime | None,
+    attribute: str | None,
+    limit: int,
+) -> list[Any]:
+    found: list[Any] = []
+    async for message in ctx.client.iter_messages(
+        ctx.chat_id,
+        search=text or None,
+        from_user=from_user,
+        offset_date=until_dt,
+        limit=1000,
+    ):
+        if since_dt and message.date < since_dt:
+            continue
+        if attribute and not getattr(message, attribute, None):
+            continue
+        found.append(message)
+        if len(found) >= limit:
+            break
+    return found
+
+
+async def _search_global(
+    ctx: Context,
+    *,
+    text: str,
+    from_user: Any,
+    since_dt: datetime | None,
+    until_dt: datetime | None,
+    attribute: str | None,
+    limit: int,
+) -> list[tuple[Any, str, int]]:
+    """Search every dialog in the account.
+
+    Telegram's global message search (entity=None) accepts a search string and
+    a from_user filter but not date/media filters, so those are applied
+    client-side. To support --type without text we iterate each dialog.
+    """
+    found: list[tuple[Any, str, int]] = []
+    title_cache: dict[int, str] = {}
+
+    def _matches(message: Any) -> bool:
+        if since_dt and message.date < since_dt:
+            return False
+        if until_dt and message.date > until_dt:
+            return False
+        return not (attribute and not getattr(message, attribute, None))
+
+    if text:
+        async for message in ctx.client.iter_messages(
+            None,
+            search=text,
+            from_user=from_user,
+            limit=max(limit * 5, 100),
+        ):
+            if not _matches(message):
+                continue
+            chat_id = _chat_id_of(message)
+            title = await _chat_title(ctx, chat_id, title_cache)
+            found.append((message, title, chat_id))
+            if len(found) >= limit:
+                break
+    else:
+        scanned = 0
+        async for dialog in ctx.client.iter_dialogs(limit=200):
+            async for message in ctx.client.iter_messages(
+                dialog.id,
+                from_user=from_user,
+                offset_date=until_dt,
+                limit=500,
+            ):
+                if not _matches(message):
+                    continue
+                chat_id = _chat_id_of(message)
+                title = dialog.name or str(chat_id)
+                title_cache[chat_id] = title
+                found.append((message, title, chat_id))
+                if len(found) >= limit:
+                    break
+                scanned += 1
+                if scanned > 2000:
+                    break
+            if len(found) >= limit or scanned > 2000:
+                break
+
+    return found
+
+
+def _chat_id_of(message: Any) -> int:
+    """Resolve the originating chat id across peer types."""
+    peer_id = message.peer_id
+    if hasattr(peer_id, "channel_id"):
+        return int(f"-100{peer_id.channel_id}")
+    if hasattr(peer_id, "chat_id"):
+        return int(f"-{peer_id.chat_id}")
+    if hasattr(peer_id, "user_id"):
+        return int(peer_id.user_id)
+    return 0
+
+
+async def _chat_title(
+    ctx: Context, chat_id: int, cache: dict[int, str]
+) -> str:
+    if chat_id in cache:
+        return cache[chat_id]
+    title = str(chat_id)
+    try:
+        entity = await ctx.client.get_entity(chat_id)
+        title = (
+            getattr(entity, "title", None)
+            or " ".join(
+                filter(
+                    None,
+                    [
+                        getattr(entity, "first_name", "") or "",
+                        getattr(entity, "last_name", "") or "",
+                    ],
+                )
+            ).strip()
+            or getattr(entity, "username", None)
+            or str(chat_id)
+        )
+    except Exception:
+        logger.debug("Could not resolve chat title for %s", chat_id)
+    cache[chat_id] = title
+    return title
+
+
 def _parse_args(args: list[str]) -> tuple[list[str], dict[str, str]]:
-    """Split positional tokens from ``--flag value`` pairs."""
+    """Split positional tokens from ``--flag value`` pairs.
+
+    Boolean flags (``--global``) are stripped so they never become part of the
+    search text.
+    """
     tokens: list[str] = []
     flags: dict[str, str] = {}
     known = {"--from", "--since", "--until", "--type", "--limit"}
+    booleans = {"--global"}
     index = 0
     while index < len(args):
         token = args[index]
@@ -171,6 +341,8 @@ def _parse_args(args: list[str]) -> tuple[list[str], dict[str, str]]:
                 raise UsageError(f"`{token}` needs a value.")
             flags[token[2:]] = args[index + 1]
             index += 2
+        elif token in booleans:
+            index += 1
         else:
             tokens.append(token)
             index += 1
