@@ -1,50 +1,82 @@
-"""AI commands backed by AnyAPI (OpenAI-compatible), with a RapidAPI fallback."""
+"""AI commands: ``gpt``, provider management, model selection and status.
+
+The HTTP/parsing logic lives in :mod:`selfbot.services.ai`; this module is the
+thin command layer that turns Telegram invocations into manager calls. The
+historical private names (``_extract_answer``, ``_format_rapidapi_error`` and
+the provider constants) are re-exported so existing tests and any third-party
+imports keep working unchanged.
+"""
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
 from typing import Any
 
-from ..errors import FeatureDisabledError, ProviderError, UsageError
+from ..errors import FeatureDisabledError, UsageError, ValidationError
 from ..registry import Context, command
+from ..services.ai import (
+    ANYAPI_DEFAULT_BASE_URL,
+    ANYAPI_DEFAULT_MODEL,
+    BACKUP_RAPIDAPI_CHAT_URL,
+    BACKUP_RAPIDAPI_GENERE,
+    BACKUP_RAPIDAPI_HOST,
+    BLUESMINDS_DEFAULT_BASE_URL,
+    RAPIDAPI_CHAT_URL,
+    RAPIDAPI_HOST,
+    RAPIDAPI_MODEL,
+    SYSTEM_PROMPT,
+    AIManager,
+)
+from ..services.ai import (
+    extract_answer as _extract_answer,
+)
+from ..services.ai import (
+    format_rapidapi_error as _format_rapidapi_error,
+)
 from ..utils.text import truncate
 
 logger = logging.getLogger(__name__)
 
 CATEGORY = "AI"
-SYSTEM_PROMPT = "Format your replies with markdown when applicable"
 
-# AnyAPI — primary provider (OpenAI-compatible /v1/chat/completions).
-# Base URL and model come from config (ANYAPI_BASE_URL / ANYAPI_MODEL), so the
-# defaults here are only used when config values are absent.
-ANYAPI_DEFAULT_BASE_URL = "https://api.anyapi.ai/v1"
-ANYAPI_DEFAULT_MODEL = "anthropic/claude-sonnet-5"
-
-# BluesMinds — OpenAI-compatible secondary provider. It is tried when
-# AnyAPI is rate-limited, before the legacy RapidAPI fallback.
-BLUESMINDS_DEFAULT_BASE_URL = "https://api.bluesminds.com/v1"
-
-# RapidAPI — legacy fallback used when the OpenAI-compatible providers are
-# rate-limited and a RAPIDAPI_KEY is still configured.
-RAPIDAPI_HOST = "chatgpt-api8.p.rapidapi.com"
-RAPIDAPI_CHAT_URL = f"https://{RAPIDAPI_HOST}/chato"
-RAPIDAPI_MODEL = "GPT_5_4_high"
-
-BACKUP_RAPIDAPI_HOST = "adult-gpt.p.rapidapi.com"
-BACKUP_RAPIDAPI_CHAT_URL = f"https://{BACKUP_RAPIDAPI_HOST}/adultgpt"
-BACKUP_RAPIDAPI_GENERE = "ai-gf-1"
-
-# HTTP statuses that mean "try the next provider" instead of "user error".
-_FALLBACK_STATUSES = frozenset({408, 429, 502, 503, 504})
+__all__ = [
+    "ANYAPI_DEFAULT_BASE_URL",
+    "ANYAPI_DEFAULT_MODEL",
+    "BACKUP_RAPIDAPI_CHAT_URL",
+    "BACKUP_RAPIDAPI_GENERE",
+    "BACKUP_RAPIDAPI_HOST",
+    "BLUESMINDS_DEFAULT_BASE_URL",
+    "RAPIDAPI_CHAT_URL",
+    "RAPIDAPI_HOST",
+    "RAPIDAPI_MODEL",
+    "SYSTEM_PROMPT",
+    "_extract_answer",
+    "_format_rapidapi_error",
+]
 
 
-class _ProviderStatusError(ProviderError):
-    """ProviderError that carries the HTTP status for fallback decisions."""
+def get_manager(ctx: Context) -> AIManager:
+    """Return the bot's AIManager, creating one lazily (used by tests)."""
+    bot = ctx.bot
+    manager = getattr(bot, "ai", None)
+    if manager is None:
+        manager = AIManager(bot)
+        bot.ai = manager
+    return manager
 
-    def __init__(self, message: str, status: int) -> None:
-        super().__init__(message)
-        self.status = status
+
+async def _delete_status(message: Any) -> None:
+    if message is None:
+        return
+    try:
+        await message.delete()
+    except Exception:
+        logger.debug("Could not delete the GPT status message", exc_info=True)
+
+
+# --------------------------------------------------------------------------
+# gpt
+# --------------------------------------------------------------------------
 
 
 @command(
@@ -55,80 +87,23 @@ class _ProviderStatusError(ProviderError):
     examples=("gpt What is the meaning of life?",),
 )
 async def cmd_gpt(ctx: Context) -> None:
-    """Ask GPT through AnyAPI, falling back to RapidAPI when configured."""
-    ai = ctx.config.ai
-    if not ai.enabled:
-        raise FeatureDisabledError(
-            "No AI provider is configured. Set `ANYAPI_KEY`, `BLUESMINDS_API_KEY`, "
-            "or `RAPIDAPI_KEY` "
-            "in your `.env`."
-        )
-
+    """Ask an AI model, trying each configured provider until one answers."""
     prompt = ctx.raw_args.strip()
     if not prompt:
         raise UsageError(f"Usage: `{ctx.config.command_prefix}gpt <prompt>`")
 
+    manager = get_manager(ctx)
+    providers = await manager.providers(enabled_only=True)
+    if not providers:
+        raise FeatureDisabledError(
+            "No AI provider is configured. Add one with "
+            "`provider add <name> <base_url> <api_key> [model]`, or set "
+            "ANYAPI_KEY / BLUESMINDS_API_KEY / RAPIDAPI_KEY in your `.env`."
+        )
+
     status = await ctx.reply("🤖 Thinking…")
     try:
-        if ai.anyapi_key:
-            try:
-                answer = await _anyapi_completion(
-                    ctx.bot.http,
-                    prompt=prompt,
-                    api_key=ai.anyapi_key,
-                    base_url=ai.anyapi_base_url,
-                    model=ai.anyapi_model,
-                )
-            except ProviderError as exc:
-                if isinstance(exc, _ProviderStatusError) and exc.status in _FALLBACK_STATUSES:
-                    if ai.bluesminds_key:
-                        logger.warning(
-                            "AnyAPI unavailable (HTTP %s); falling back to BluesMinds", exc.status
-                        )
-                        try:
-                            answer = await _anyapi_completion(
-                                ctx.bot.http,
-                                prompt=prompt,
-                                api_key=ai.bluesminds_key,
-                                base_url=ai.bluesminds_base_url,
-                                model=ai.bluesminds_model,
-                            )
-                        except ProviderError as blues_exc:
-                            if (
-                                isinstance(blues_exc, _ProviderStatusError)
-                                and blues_exc.status in _FALLBACK_STATUSES
-                                and ai.rapidapi_key
-                            ):
-                                logger.warning(
-                                    "BluesMinds unavailable (HTTP %s); falling back to RapidAPI",
-                                    blues_exc.status,
-                                )
-                                answer = await _rapidapi_completion(
-                                    ctx.bot.http, prompt=prompt, api_key=ai.rapidapi_key
-                                )
-                            else:
-                                raise
-                    elif ai.rapidapi_key:
-                        logger.warning(
-                            "AnyAPI unavailable (HTTP %s); falling back to RapidAPI", exc.status
-                        )
-                        answer = await _rapidapi_completion(
-                            ctx.bot.http, prompt=prompt, api_key=ai.rapidapi_key
-                        )
-                    else:
-                        raise
-                else:
-                    raise
-        elif ai.bluesminds_key:
-            answer = await _anyapi_completion(
-                ctx.bot.http,
-                prompt=prompt,
-                api_key=ai.bluesminds_key,
-                base_url=ai.bluesminds_base_url,
-                model=ai.bluesminds_model,
-            )
-        else:
-            answer = await _rapidapi_completion(ctx.bot.http, prompt=prompt, api_key=ai.rapidapi_key)
+        answer = await manager.chat(prompt, history=False)
     finally:
         await _delete_status(status)
 
@@ -136,259 +111,300 @@ async def cmd_gpt(ctx: Context) -> None:
 
 
 # --------------------------------------------------------------------------
-# AnyAPI (OpenAI-compatible)
+# aistatus
 # --------------------------------------------------------------------------
 
 
-async def _anyapi_completion(
-    http: Any,
-    *,
-    prompt: str,
-    api_key: str,
-    base_url: str,
-    model: str,
-) -> str:
-    """Request one chat completion from AnyAPI and return its text."""
-    url = f"{base_url.rstrip('/')}/chat/completions"
-    response = await http.request(
-        "POST",
-        url,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": model,
-            "temperature": 1,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-        },
-        timeout=120,
-        # A retry after an uncertain timeout can duplicate a billable request.
-        retries=0,
-    )
+@command("aistatus", category=CATEGORY, sudo_only=True, usage="aistatus [test <name>]")
+async def cmd_aistatus(ctx: Context) -> None:
+    """Show configured AI providers, their health and any active cooldown."""
+    manager = get_manager(ctx)
 
-    try:
-        payload = await response.json(content_type=None)
-    except Exception as exc:
-        raise _ProviderStatusError(
-            f"AnyAPI sent an invalid response (HTTP {response.status}).", response.status
-        ) from exc
-
-    if response.status >= 400:
-        raise _ProviderStatusError(
-            _format_provider_error(payload, response.status, "AnyAPI"), response.status
-        )
-
-    if isinstance(payload, Mapping) and payload.get("error"):
-        raise _ProviderStatusError(
-            _format_provider_error(payload, response.status, "AnyAPI"),
-            response.status or 400,
-        )
-
-    return _extract_answer(payload, "AnyAPI")
-
-
-# --------------------------------------------------------------------------
-# RapidAPI (legacy)
-# --------------------------------------------------------------------------
-
-
-async def _rapidapi_completion(http: Any, *, prompt: str, api_key: str) -> str:
-    """Request one chat completion from RapidAPI and return its text."""
-    response = await http.request(
-        "POST",
-        RAPIDAPI_CHAT_URL,
-        headers={
-            "x-rapidapi-key": api_key,
-            "x-rapidapi-host": RAPIDAPI_HOST,
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": RAPIDAPI_MODEL,
-            "temperature": 1,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-        },
-        timeout=120,
-        retries=0,
-    )
-
-    try:
-        payload = await response.json(content_type=None)
-    except Exception as exc:
-        if response.status in _FALLBACK_STATUSES:
-            logger.warning("Primary RapidAPI quota reached; trying the backup API")
-            return await _backup_rapidapi_completion(http, prompt=prompt, api_key=api_key)
-        raise ProviderError(
-            f"RapidAPI sent an invalid response (HTTP {response.status})."
-        ) from exc
-
-    if response.status in _FALLBACK_STATUSES:
-        logger.warning("Primary RapidAPI quota reached; trying the backup API")
-        return await _backup_rapidapi_completion(http, prompt=prompt, api_key=api_key)
-
-    if response.status >= 400:
-        raise ProviderError(_format_provider_error(payload, response.status, "RapidAPI"))
-
-    if isinstance(payload, Mapping) and payload.get("error"):
-        raise ProviderError(_format_provider_error(payload, response.status, "RapidAPI"))
-
-    return _extract_answer(payload, "RapidAPI")
-
-
-async def _backup_rapidapi_completion(http: Any, *, prompt: str, api_key: str) -> str:
-    """Use Adult GPT when the primary RapidAPI plan returns an error status."""
-    response = await http.request(
-        "POST",
-        BACKUP_RAPIDAPI_CHAT_URL,
-        headers={
-            "x-rapidapi-key": api_key,
-            "x-rapidapi-host": BACKUP_RAPIDAPI_HOST,
-            "Content-Type": "application/json",
-        },
-        json={
-            "messages": [{"role": "user", "content": prompt}],
-            "genere": BACKUP_RAPIDAPI_GENERE,
-            "bot_name": "",
-            "temperature": 0.9,
-            "top_k": 10,
-            "top_p": 0.9,
-            "max_tokens": 200,
-        },
-        timeout=120,
-        retries=0,
-    )
-
-    try:
-        payload = await response.json(content_type=None)
-    except Exception as exc:
-        raise ProviderError(
-            f"Backup RapidAPI sent an invalid response (HTTP {response.status})."
-        ) from exc
-
-    if response.status >= 400:
-        raise ProviderError(_format_provider_error(payload, response.status, "RapidAPI"))
-
-    if isinstance(payload, Mapping) and payload.get("error"):
-        raise ProviderError(_format_provider_error(payload, response.status, "RapidAPI"))
-
-    return _extract_answer(payload, "RapidAPI")
-
-
-# --------------------------------------------------------------------------
-# Response parsing & error formatting
-# --------------------------------------------------------------------------
-
-
-def _extract_answer(payload: Any, provider: str = "AnyAPI") -> str:
-    """Extract text from common chat-completion response shapes."""
-    if isinstance(payload, str):
-        answer = payload.strip()
-        if answer:
-            return answer
-        raise ProviderError(f"{provider} returned an empty completion.")
-
-    if not isinstance(payload, Mapping):
-        raise ProviderError(f"{provider} returned an unexpected response.")
-
-    choices = payload.get("choices")
-    if isinstance(choices, list) and choices and isinstance(choices[0], Mapping):
-        choice = choices[0]
-        message = choice.get("message")
-        content = message.get("content") if isinstance(message, Mapping) else None
-        answer = _content_text(content)
-        if not answer and isinstance(choice.get("text"), str):
-            answer = choice["text"].strip()
-        if answer:
-            return answer
-
-    message = payload.get("message")
-    if isinstance(message, Mapping):
-        answer = _content_text(message.get("content"))
-        if answer:
-            return answer
-    elif isinstance(message, str) and message.strip():
-        return message.strip()
-
-    for key in ("response", "content", "text", "answer", "result"):
-        value = payload.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-
-    data = payload.get("data")
-    if isinstance(data, (str, Mapping)):
-        try:
-            return _extract_answer(data, provider)
-        except ProviderError:
-            pass
-
-    raise ProviderError(f"{provider} returned an empty completion.")
-
-
-def _content_text(content: Any) -> str:
-    if isinstance(content, str):
-        return content.strip()
-    if not isinstance(content, list):
-        return ""
-
-    pieces: list[str] = []
-    for part in content:
-        if isinstance(part, str):
-            pieces.append(part)
-        elif isinstance(part, Mapping) and isinstance(part.get("text"), str):
-            pieces.append(part["text"])
-    return "\n".join(pieces).strip()
-
-
-def _format_provider_error(payload: Any, status: int, provider: str) -> str:
-    """Turn a provider error response into a short, actionable message."""
-    detail = ""
-    if isinstance(payload, Mapping):
-        error = payload.get("error")
-        if isinstance(error, Mapping):
-            for key in ("message", "detail", "error"):
-                if isinstance(error.get(key), str):
-                    detail = error[key].strip()
-                    break
-        elif isinstance(error, str):
-            detail = error.strip()
-
-        if not detail:
-            for key in ("message", "detail"):
-                if isinstance(payload.get(key), str):
-                    detail = payload[key].strip()
-                    break
-
-    friendly = {
-        401: f"{provider} rejected the API key.",
-        403: f"{provider} denied access. Check the subscription or model access.",
-        408: f"The {provider} request timed out. Try again.",
-        429: f"The {provider} quota or rate limit was reached. Try again later.",
-        502: f"The AI service behind {provider} is temporarily unavailable.",
-        503: f"The AI service behind {provider} is temporarily unavailable.",
-    }.get(status)
-    if friendly:
-        return friendly
-
-    if detail:
-        return f"{provider} error (HTTP {status}): {truncate(detail, 300)}"
-    return f"{provider} returned HTTP {status}."
-
-
-def _format_rapidapi_error(payload: Any, status: int) -> str:
-    """Backwards-compatible wrapper used by older callers/tests."""
-    return _format_provider_error(payload, status, "RapidAPI")
-
-
-async def _delete_status(message: Any) -> None:
-    if message is None:
+    if ctx.args and ctx.args[0].lower() == "test":
+        if len(ctx.args) < 2:
+            raise UsageError("Usage: `aistatus test <provider>`")
+        name = ctx.args[1]
+        await ctx.reply(f"🔌 Testing `{name}`…")
+        ok, detail = await manager.test_provider(name)
+        icon = "✅" if ok else "❌"
+        await ctx.reply(f"{icon} **{name}** — {detail}")
         return
-    try:
-        await message.delete()
-    except Exception:
-        logger.debug("Could not delete the GPT status message", exc_info=True)
+
+    statuses = await manager.status()
+    if not statuses:
+        await ctx.reply("ℹ️ No AI providers configured. Use `provider add` to add one.")
+        return
+
+    default_name = None
+    for s in statuses:
+        if s.provider.is_default:
+            default_name = s.provider.name
+
+    lines = ["🧠 **AI providers**\n"]
+    available = sum(1 for s in statuses if s.available)
+    lines.append(
+        f"{available}/{len(statuses)} available"
+        + (f" · default: `{default_name}`" if default_name else "")
+        + "\n"
+    )
+    for s in statuses:
+        p = s.provider
+        if not p.enabled:
+            icon = "⏸"
+        elif s.cooldown_remaining:
+            icon = "❄️"
+        elif p.last_error and not p.is_default:
+            icon = "⚠️"
+        else:
+            icon = "✅"
+        title = f"{icon} **{p.name}**"
+        if p.is_default:
+            title += " _(default)_"
+        lines.append(title)
+        model = p.model or "(provider default)"
+        lines.append(f"  `{p.base_url}`")
+        lines.append(
+            f"  model: `{model}` · key: `{p.redacted_key}` · "
+            f"{p.success_count} ok / {p.failure_count} fail"
+        )
+        if s.cooldown_remaining:
+            lines.append(f"  ❄️ cooldown: {s.cooldown_remaining}s")
+        if p.last_error:
+            lines.append(f"  ⚠️ {truncate(p.last_error, 120)}")
+        lines.append("")
+
+    await ctx.reply("\n".join(lines).rstrip())
+
+
+# --------------------------------------------------------------------------
+# gptmodel
+# --------------------------------------------------------------------------
+
+
+@command(
+    "gptmodel",
+    category=CATEGORY,
+    sudo_only=True,
+    usage="gptmodel <list|set|clear|current> [model]",
+    examples=("gptmodel list", "gptmodel set openai/gpt-4o-mini", "gptmodel current"),
+)
+async def cmd_gptmodel(ctx: Context) -> None:
+    """List available models or choose the default model used by ``gpt``."""
+    if not ctx.args:
+        raise UsageError(
+            "Usage: `gptmodel <list|set|clear|current> [model]`\n"
+            "• `list` — discover models from enabled providers\n"
+            "• `set <model>` — set the global default model\n"
+            "• `set <provider> <model>` — set one provider's model\n"
+            "• `clear` — remove the global override\n"
+            "• `current` — show what the next `gpt` call uses"
+        )
+
+    manager = get_manager(ctx)
+    action = ctx.args[0].lower()
+
+    if action == "list":
+        status = await ctx.reply("🔍 Discovering models…")
+        models = await manager.list_models()
+        await _delete_status(status)
+        if not models:
+            await ctx.reply(
+                "ℹ️ No models discovered. Check `aistatus`; providers may be "
+                "unreachable or you can set a model directly with "
+                "`gptmodel set <model>`."
+            )
+            return
+        current = await manager.current_model()
+        lines = [f"🧠 **Models** ({len(models)}) — current: `{current}`\n"]
+        for entry in models[:60]:
+            marker = " ◂ current" if entry["current"] else ""
+            providers = ", ".join(entry["providers"])
+            lines.append(f"• `{entry['id']}` _({providers})_{marker}")
+        if len(models) > 60:
+            lines.append(f"\n_…and {len(models) - 60} more_")
+        await ctx.reply("\n".join(lines))
+
+    elif action == "set":
+        if len(ctx.args) < 2:
+            raise UsageError("Usage: `gptmodel set <model>` or `gptmodel set <provider> <model>`")
+
+        # Two-argument form: gptmodel set <provider> <model>
+        if len(ctx.args) >= 3 and "/" not in ctx.args[1]:
+            provider_name = ctx.args[1]
+            model = " ".join(ctx.args[2:]).strip()
+            existing = await ctx.db.get_provider(provider_name)
+            if existing is None:
+                raise ValidationError(f"No provider named `{provider_name}`.")
+            await manager.set_provider_model(provider_name, model)
+            await ctx.reply(f"✅ Set `{provider_name}` model to `{model}`.")
+            return
+
+        model = " ".join(ctx.args[1:]).strip()
+        if len(model) > 200:
+            raise ValidationError("Model name is too long.")
+        await manager.set_global_model(model)
+        await ctx.reply(f"✅ Default model set to `{model}`.")
+
+    elif action == "clear":
+        await manager.clear_global_model()
+        await ctx.reply("✅ Cleared the global model override.")
+
+    elif action == "current":
+        current = await manager.current_model()
+        default = await ctx.db.get_default_provider()
+        provider_name = default.name if default else "(config)"
+        await ctx.reply(
+            f"🧠 Next `gpt` call uses `{current}` via **{provider_name}**."
+        )
+
+    else:
+        raise ValidationError(f"Unknown action `{action}`. Try list/set/clear/current.")
+
+
+# --------------------------------------------------------------------------
+# provider
+# --------------------------------------------------------------------------
+
+
+@command(
+    "provider",
+    category=CATEGORY,
+    sudo_only=True,
+    usage=(
+        "provider <add|remove|list|default|enable|disable|test> "
+        "[name] [base_url] [api_key] [model]"
+    ),
+    examples=(
+        "provider add openai https://api.openai.com/v1 sk-xxx gpt-4o-mini",
+        "provider list",
+        "provider default openai",
+        "provider test openai",
+    ),
+)
+async def cmd_provider(ctx: Context) -> None:
+    """Add, list and manage AI providers stored in the database."""
+    if not ctx.args:
+        prefix = ctx.config.command_prefix
+        await ctx.reply(
+            "🧠 **AI providers**\n\n"
+            f"`{prefix}provider add <name> <base_url> <api_key> [model]`\n"
+            f"`{prefix}provider list`\n"
+            f"`{prefix}provider default <name>`\n"
+            f"`{prefix}provider enable|disable <name>`\n"
+            f"`{prefix}provider test <name>`\n"
+            f"`{prefix}provider remove <name>`"
+        )
+        return
+
+    manager = get_manager(ctx)
+    action = ctx.args[0].lower()
+
+    if action == "add":
+        await _provider_add(ctx, manager)
+    elif action in {"list", "ls"}:
+        await _provider_list(ctx, manager)
+    elif action == "remove":
+        if len(ctx.args) < 2:
+            raise UsageError("Usage: `provider remove <name>`")
+        name = ctx.args[1]
+        if await manager.remove_provider(name):
+            await ctx.reply(f"✅ Removed provider `{name}`.")
+        else:
+            await ctx.reply(f"ℹ️ No provider named `{name}`.")
+    elif action == "default":
+        if len(ctx.args) < 2:
+            raise UsageError("Usage: `provider default <name>`")
+        name = ctx.args[1]
+        try:
+            await manager.set_default(name)
+        except KeyError:
+            raise ValidationError(f"No provider named `{name}`.") from None
+        await ctx.reply(f"✅ `{name}` is now the default provider.")
+    elif action == "enable":
+        await _provider_toggle(ctx, manager, True)
+    elif action == "disable":
+        await _provider_toggle(ctx, manager, False)
+    elif action == "test":
+        if len(ctx.args) < 2:
+            raise UsageError("Usage: `provider test <name>`")
+        name = ctx.args[1]
+        await ctx.reply(f"🔌 Testing `{name}`…")
+        ok, detail = await manager.test_provider(name)
+        icon = "✅" if ok else "❌"
+        await ctx.reply(f"{icon} **{name}** — {detail}")
+    else:
+        raise ValidationError(
+            f"Unknown action `{action}`. "
+            "Try add/list/default/enable/disable/test/remove."
+        )
+
+
+async def _provider_add(ctx: Context, manager: AIManager) -> None:
+    if len(ctx.args) < 4:
+        raise UsageError(
+            "Usage: `provider add <name> <base_url> <api_key> [model]`"
+        )
+    name = ctx.args[1].lower()
+    base_url = ctx.args[2]
+    api_key = ctx.args[3]
+    model = " ".join(ctx.args[4:]).strip()
+
+    if not name.replace("_", "").replace("-", "").isalnum():
+        raise ValidationError("Provider name may only contain letters, numbers, '-' and '_'.")
+    if not (base_url.startswith("http://") or base_url.startswith("https://")):
+        raise ValidationError("Base URL must start with http:// or https://")
+    if len(api_key) < 4:
+        raise ValidationError("That API key looks too short.")
+
+    existing = await ctx.db.get_provider(name)
+    make_default = existing is None and await ctx.db.count_providers() == 0
+
+    if existing is not None:
+        await ctx.db.update_provider(
+            name, base_url=base_url, api_key=api_key, model=model or existing.model
+        )
+        manager.invalidate()
+        await ctx.reply(f"✅ Updated provider `{name}`.")
+        return
+
+    await manager.add_openai_provider(
+        name, base_url, api_key, model=model, is_default=make_default
+    )
+    suffix = " (set as default)" if make_default else ""
+    await ctx.reply(
+        f"✅ Added provider `{name}` at `{base_url}`{suffix}.\n"
+        "Run `provider test <name>` to verify the key, or `aistatus`."
+    )
+
+
+async def _provider_list(ctx: Context, manager: AIManager) -> None:
+    statuses = await manager.status()
+    if not statuses:
+        await ctx.reply("ℹ️ No providers configured. Use `provider add`.")
+        return
+    lines = ["🧠 **Providers**\n"]
+    for s in statuses:
+        p = s.provider
+        icon = "✅" if s.available else ("⏸" if not p.enabled else "❄️")
+        default = " _(default)_" if p.is_default else ""
+        lines.append(
+            f"{icon} `{p.name}`{default} — `{p.model or 'default'}` "
+            f"· {p.redacted_key}"
+        )
+    await ctx.reply("\n".join(lines))
+
+
+async def _provider_toggle(
+    ctx: Context, manager: AIManager, enabled: bool
+) -> None:
+    if len(ctx.args) < 2:
+        state = "enable" if enabled else "disable"
+        raise UsageError(f"Usage: `provider {state} <name>`")
+    name = ctx.args[1]
+    existing = await ctx.db.get_provider(name)
+    if existing is None:
+        raise ValidationError(f"No provider named `{name}`.")
+    await ctx.db.update_provider(name, enabled=enabled)
+    manager.invalidate()
+    verb = "enabled" if enabled else "disabled"
+    await ctx.reply(f"✅ {verb.capitalize()} provider `{name}`.")

@@ -198,6 +198,9 @@ class FakeBot:
         self.confirm_result = True
         self.confirm_prompts: list[str] = []
         self.http = None
+        self.ai = None
+        self.metrics = None
+        self.plugins = None
         self._auto_reply_cache: dict[int, list[Any]] = {}
         self.auto_reply_cache_invalidated: list[int | None] = []
         self.reaction_cache_invalidated = False
