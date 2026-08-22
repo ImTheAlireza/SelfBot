@@ -139,7 +139,7 @@ which can deadlock when invoked by the process being restarted.
 Set `ANYAPI_KEY` in `.env` to enable the `gpt` command (OpenAI-compatible,
 `https://api.anyapi.ai/v1`). Pick the model with `ANYAPI_MODEL` — default
 `anthropic/claude-sonnet-5`. If AnyAPI is rate-limited or unavailable and a legacy
-`RAPIDAPI_KEY` is still configured, the command retries through RapidAPI.
+If `BLUESMINDS_API_KEY` is configured, the command tries BluesMinds next when AnyAPI is rate-limited; if that is also unavailable and `RAPIDAPI_KEY` is configured, it retries through RapidAPI.
 
 ### Messaging
 | Command | Description |

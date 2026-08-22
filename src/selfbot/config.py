@@ -98,6 +98,7 @@ class SpamConfig:
 
 ANYAPI_DEFAULT_BASE_URL = "https://api.anyapi.ai/v1"
 ANYAPI_DEFAULT_MODEL = "anthropic/claude-sonnet-5"
+BLUESMINDS_DEFAULT_BASE_URL = "https://api.bluesminds.com/v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,10 +107,14 @@ class AIConfig:
     anyapi_key: str = ""
     anyapi_base_url: str = ANYAPI_DEFAULT_BASE_URL
     anyapi_model: str = ANYAPI_DEFAULT_MODEL
+    bluesminds_key: str = ""
+    bluesminds_base_url: str = BLUESMINDS_DEFAULT_BASE_URL
+    bluesminds_model: str = ANYAPI_DEFAULT_MODEL
+
 
     @property
     def enabled(self) -> bool:
-        return bool(self.anyapi_key or self.rapidapi_key)
+        return bool(self.anyapi_key or self.bluesminds_key or self.rapidapi_key)
 
     @property
     def provider(self) -> str:
@@ -260,6 +265,9 @@ def load_config(
         anyapi_key=_env("ANYAPI_KEY"),
         anyapi_base_url=_env("ANYAPI_BASE_URL") or ANYAPI_DEFAULT_BASE_URL,
         anyapi_model=_env("ANYAPI_MODEL") or ANYAPI_DEFAULT_MODEL,
+        bluesminds_key=_env("BLUESMINDS_API_KEY"),
+        bluesminds_base_url=_env("BLUESMINDS_BASE_URL") or BLUESMINDS_DEFAULT_BASE_URL,
+        bluesminds_model=_env("BLUESMINDS_MODEL") or ANYAPI_DEFAULT_MODEL,
     )
 
     return Config(

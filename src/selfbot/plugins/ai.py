@@ -21,8 +21,12 @@ SYSTEM_PROMPT = "Format your replies with markdown when applicable"
 ANYAPI_DEFAULT_BASE_URL = "https://api.anyapi.ai/v1"
 ANYAPI_DEFAULT_MODEL = "anthropic/claude-sonnet-5"
 
-# RapidAPI — legacy fallback used when AnyAPI is rate-limited and a
-# RAPIDAPI_KEY is still configured.
+# BluesMinds — OpenAI-compatible secondary provider. It is tried when
+# AnyAPI is rate-limited, before the legacy RapidAPI fallback.
+BLUESMINDS_DEFAULT_BASE_URL = "https://api.bluesminds.com/v1"
+
+# RapidAPI — legacy fallback used when the OpenAI-compatible providers are
+# rate-limited and a RAPIDAPI_KEY is still configured.
 RAPIDAPI_HOST = "chatgpt-api8.p.rapidapi.com"
 RAPIDAPI_CHAT_URL = f"https://{RAPIDAPI_HOST}/chato"
 RAPIDAPI_MODEL = "GPT_5_4_high"
@@ -55,7 +59,8 @@ async def cmd_gpt(ctx: Context) -> None:
     ai = ctx.config.ai
     if not ai.enabled:
         raise FeatureDisabledError(
-            "No AI provider is configured. Set `ANYAPI_KEY` (or `RAPIDAPI_KEY`) "
+            "No AI provider is configured. Set `ANYAPI_KEY`, `BLUESMINDS_API_KEY`, "
+            "or `RAPIDAPI_KEY` "
             "in your `.env`."
         )
 
@@ -76,7 +81,34 @@ async def cmd_gpt(ctx: Context) -> None:
                 )
             except ProviderError as exc:
                 if isinstance(exc, _ProviderStatusError) and exc.status in _FALLBACK_STATUSES:
-                    if ai.rapidapi_key:
+                    if ai.bluesminds_key:
+                        logger.warning(
+                            "AnyAPI unavailable (HTTP %s); falling back to BluesMinds", exc.status
+                        )
+                        try:
+                            answer = await _anyapi_completion(
+                                ctx.bot.http,
+                                prompt=prompt,
+                                api_key=ai.bluesminds_key,
+                                base_url=ai.bluesminds_base_url,
+                                model=ai.bluesminds_model,
+                            )
+                        except ProviderError as blues_exc:
+                            if (
+                                isinstance(blues_exc, _ProviderStatusError)
+                                and blues_exc.status in _FALLBACK_STATUSES
+                                and ai.rapidapi_key
+                            ):
+                                logger.warning(
+                                    "BluesMinds unavailable (HTTP %s); falling back to RapidAPI",
+                                    blues_exc.status,
+                                )
+                                answer = await _rapidapi_completion(
+                                    ctx.bot.http, prompt=prompt, api_key=ai.rapidapi_key
+                                )
+                            else:
+                                raise
+                    elif ai.rapidapi_key:
                         logger.warning(
                             "AnyAPI unavailable (HTTP %s); falling back to RapidAPI", exc.status
                         )
@@ -87,6 +119,14 @@ async def cmd_gpt(ctx: Context) -> None:
                         raise
                 else:
                     raise
+        elif ai.bluesminds_key:
+            answer = await _anyapi_completion(
+                ctx.bot.http,
+                prompt=prompt,
+                api_key=ai.bluesminds_key,
+                base_url=ai.bluesminds_base_url,
+                model=ai.bluesminds_model,
+            )
         else:
             answer = await _rapidapi_completion(ctx.bot.http, prompt=prompt, api_key=ai.rapidapi_key)
     finally:
