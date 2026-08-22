@@ -27,6 +27,7 @@ dependencies = [
     "telethon>=1.44,<2",
     "aiohttp>=3.9",
     "aiosqlite>=0.19",
+    "cryptography>=42.0",
 ]
 
 [project.optional-dependencies]

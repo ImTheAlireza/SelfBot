@@ -25,6 +25,8 @@ from .errors import ConfigError
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "AIMessage",
+    "AIProvider",
     "AutoReply",
     "Database",
     "QuickReply",
@@ -140,6 +142,62 @@ class StickerPack:
     created_at: datetime | None = None
 
 
+@dataclass(slots=True)
+class AIProvider:
+    """A configured AI provider (OpenAI-compatible or RapidAPI)."""
+
+    name: str
+    base_url: str
+    api_key: str  # decrypted by the repository when a SecretBox is attached
+    kind: str = "openai"  # "openai" | "rapidapi" | "rapidapi_backup"
+    model: str = ""
+    is_default: bool = False
+    enabled: bool = True
+    cooldown_until: datetime | None = None
+    last_error: str | None = None
+    success_count: int = 0
+    failure_count: int = 0
+    id: int | None = None
+    created_at: datetime | None = None
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> AIProvider:
+        return cls(
+            id=int(row["id"]) if row.get("id") is not None else None,
+            name=row["name"],
+            base_url=row.get("base_url", ""),
+            api_key=row.get("api_key", ""),
+            kind=row.get("kind", "openai"),
+            model=row.get("model", ""),
+            is_default=bool(row.get("is_default", 0)),
+            enabled=bool(row.get("enabled", 1)),
+            cooldown_until=_as_aware(row.get("cooldown_until")),
+            last_error=row.get("last_error"),
+            success_count=int(row.get("success_count", 0)),
+            failure_count=int(row.get("failure_count", 0)),
+            created_at=_as_aware(row.get("created_at")),
+        )
+
+    @property
+    def redacted_key(self) -> str:
+        if not self.api_key:
+            return "(none)"
+        tail = self.api_key[-4:] if len(self.api_key) >= 4 else "••••"
+        return f"••••{tail}"
+
+
+@dataclass(slots=True)
+class AIMessage:
+    """One turn stored for conversation memory."""
+
+    chat_id: int
+    role: str
+    content: str
+    provider: str | None = None
+    id: int | None = None
+    created_at: datetime | None = None
+
+
 # --------------------------------------------------------------------------
 # Engine
 # --------------------------------------------------------------------------
@@ -157,6 +215,26 @@ class Database:
         self._conn: Any = None  # aiosqlite connection
         self._pool: Any = None  # aiomysql pool
         self._lock: Any = None
+        self._secrets: Any = None  # SecretBox, attached by the application
+
+    def attach_secrets(self, secrets: Any) -> None:
+        """Attach a :class:`~selfbot.security.SecretBox` for encrypted columns.
+
+        When attached, ``api_key`` values in ``ai_providers`` are encrypted on
+        write and decrypted on read. Without it, values are stored as-is
+        (useful in tests that do not exercise encryption).
+        """
+        self._secrets = secrets
+
+    def _encrypt(self, plaintext: str) -> str:
+        if self._secrets is None or not plaintext:
+            return plaintext
+        return self._secrets.encrypt(plaintext)
+
+    def _decrypt(self, value: str) -> str:
+        if self._secrets is None or not value:
+            return value
+        return self._secrets.decrypt(value)
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -372,8 +450,53 @@ class Database:
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )
                 """,
+                """
+                CREATE TABLE IF NOT EXISTS ai_providers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    base_url TEXT NOT NULL,
+                    api_key TEXT NOT NULL DEFAULT '',
+                    model TEXT NOT NULL DEFAULT '',
+                    kind TEXT NOT NULL DEFAULT 'openai',
+                    is_default INTEGER NOT NULL DEFAULT 0,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    cooldown_until TEXT,
+                    last_error TEXT,
+                    success_count INTEGER NOT NULL DEFAULT 0,
+                    failure_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS ai_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    provider TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS plugin_state (
+                    name TEXT PRIMARY KEY,
+                    source TEXT NOT NULL,
+                    version TEXT,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    loaded_at TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+                """,
                 "CREATE INDEX IF NOT EXISTS idx_timers_active ON timers (is_active, end_time)",
                 "CREATE INDEX IF NOT EXISTS idx_timers_user ON timers (user_id)",
+                "CREATE INDEX IF NOT EXISTS idx_ai_messages_chat ON ai_messages (chat_id, id)",
+                "CREATE INDEX IF NOT EXISTS idx_ai_providers_default ON ai_providers (is_default, enabled)",
             ]
         else:
             charset = "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
@@ -440,6 +563,51 @@ class Database:
                     chat_id BIGINT PRIMARY KEY,
                     message TEXT NOT NULL,
                     enabled BOOLEAN NOT NULL DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                ) {charset}
+                """,
+                f"""
+                CREATE TABLE IF NOT EXISTS ai_providers (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    name VARCHAR(64) NOT NULL UNIQUE,
+                    base_url VARCHAR(512) NOT NULL,
+                    api_key TEXT NOT NULL,
+                    model VARCHAR(255) NOT NULL DEFAULT '',
+                    kind VARCHAR(32) NOT NULL DEFAULT 'openai',
+                    is_default BOOLEAN NOT NULL DEFAULT FALSE,
+                    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                    cooldown_until DATETIME NULL,
+                    last_error TEXT,
+                    success_count INT NOT NULL DEFAULT 0,
+                    failure_count INT NOT NULL DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_ai_providers_default (is_default, enabled)
+                ) {charset}
+                """,
+                f"""
+                CREATE TABLE IF NOT EXISTS ai_messages (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    chat_id BIGINT NOT NULL,
+                    role VARCHAR(16) NOT NULL,
+                    content MEDIUMTEXT NOT NULL,
+                    provider VARCHAR(64),
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_ai_messages_chat (chat_id, id)
+                ) {charset}
+                """,
+                f"""
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    `key` VARCHAR(128) PRIMARY KEY,
+                    value MEDIUMTEXT NOT NULL
+                ) {charset}
+                """,
+                f"""
+                CREATE TABLE IF NOT EXISTS plugin_state (
+                    name VARCHAR(128) PRIMARY KEY,
+                    source VARCHAR(512) NOT NULL,
+                    version VARCHAR(64),
+                    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                    loaded_at TIMESTAMP NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 ) {charset}
                 """,
@@ -837,3 +1005,393 @@ class Database:
 
     async def delete_sticker_pack(self, name: str) -> int:
         return await self.execute("DELETE FROM sticker_packs WHERE name = %s", (name,))
+
+    # -- ai providers ------------------------------------------------------
+
+    async def list_providers(self, *, enabled_only: bool = False) -> list[AIProvider]:
+        query = "SELECT * FROM ai_providers"
+        if enabled_only:
+            query += " WHERE enabled = 1"
+        query += " ORDER BY is_default DESC, id ASC"
+        rows = await self.fetch_all(query)
+        providers = []
+        for row in rows:
+            row = dict(row)
+            row["api_key"] = self._decrypt(row.get("api_key", ""))
+            providers.append(AIProvider.from_row(row))
+        return providers
+
+    async def get_provider(self, name: str) -> AIProvider | None:
+        row = await self.fetch_one(
+            "SELECT * FROM ai_providers WHERE name = %s", (name,)
+        )
+        if row is None:
+            return None
+        row = dict(row)
+        row["api_key"] = self._decrypt(row.get("api_key", ""))
+        return AIProvider.from_row(row)
+
+    async def get_default_provider(self) -> AIProvider | None:
+        row = await self.fetch_one(
+            "SELECT * FROM ai_providers WHERE is_default = 1 AND enabled = 1 "
+            "ORDER BY id ASC LIMIT 1"
+        )
+        if row is None:
+            return None
+        row = dict(row)
+        row["api_key"] = self._decrypt(row.get("api_key", ""))
+        return AIProvider.from_row(row)
+
+    async def add_provider(
+        self,
+        name: str,
+        base_url: str,
+        api_key: str,
+        *,
+        model: str = "",
+        kind: str = "openai",
+        is_default: bool = False,
+    ) -> AIProvider:
+        if is_default:
+            await self.execute("UPDATE ai_providers SET is_default = 0")
+        await self.execute(
+            "INSERT INTO ai_providers "
+            "(name, base_url, api_key, model, kind, is_default, enabled) "
+            "VALUES (%s, %s, %s, %s, %s, %s, 1)",
+            (
+                name,
+                base_url,
+                self._encrypt(api_key),
+                model,
+                kind,
+                1 if is_default else 0,
+            ),
+        )
+        row = await self.fetch_one(
+            "SELECT * FROM ai_providers WHERE name = %s", (name,)
+        )
+        assert row is not None
+        row = dict(row)
+        row["api_key"] = self._decrypt(row.get("api_key", ""))
+        return AIProvider.from_row(row)
+
+    async def update_provider(self, name: str, **fields: Any) -> int:
+        allowed = {"base_url", "api_key", "model", "kind", "enabled", "is_default"}
+        updates: list[str] = []
+        params: list[Any] = []
+        for key, value in fields.items():
+            if key not in allowed:
+                raise ValueError(f"Cannot update provider field {key!r}")
+            if key == "api_key":
+                value = self._encrypt(value or "")
+            elif key in {"enabled", "is_default"}:
+                value = 1 if value else 0
+            updates.append(f"{key} = %s")
+            params.append(value)
+        if not updates:
+            return 0
+        if fields.get("is_default"):
+            await self.execute("UPDATE ai_providers SET is_default = 0")
+        params.append(name)
+        return await self.execute(
+            f"UPDATE ai_providers SET {', '.join(updates)} WHERE name = %s",
+            tuple(params),
+        )
+
+    async def set_default_provider(self, name: str) -> int:
+        await self.execute("UPDATE ai_providers SET is_default = 0")
+        return await self.execute(
+            "UPDATE ai_providers SET is_default = 1 WHERE name = %s", (name,)
+        )
+
+    async def delete_provider(self, name: str) -> int:
+        return await self.execute(
+            "DELETE FROM ai_providers WHERE name = %s", (name,)
+        )
+
+    async def set_provider_cooldown(
+        self, name: str, until: datetime | None, error: str | None = None
+    ) -> int:
+        return await self.execute(
+            "UPDATE ai_providers SET cooldown_until = %s, last_error = %s "
+            "WHERE name = %s",
+            (self._fmt_dt(until) if until else None, error, name),
+        )
+
+    async def clear_provider_cooldown(self, name: str) -> int:
+        return await self.execute(
+            "UPDATE ai_providers SET cooldown_until = NULL WHERE name = %s",
+            (name,),
+        )
+
+    async def record_provider_result(
+        self, name: str, *, success: bool, error: str | None = None
+    ) -> None:
+        if success:
+            await self.execute(
+                "UPDATE ai_providers SET success_count = success_count + 1, "
+                "cooldown_until = NULL, last_error = NULL WHERE name = %s",
+                (name,),
+            )
+        else:
+            await self.execute(
+                "UPDATE ai_providers SET failure_count = failure_count + 1, "
+                "last_error = %s WHERE name = %s",
+                (error, name),
+            )
+
+    async def count_providers(self) -> int:
+        row = await self.fetch_one(
+            "SELECT COUNT(*) AS n FROM ai_providers WHERE enabled = 1"
+        )
+        return int(row["n"]) if row else 0
+
+    # -- ai conversation memory -------------------------------------------
+
+    async def add_ai_message(
+        self,
+        chat_id: int,
+        role: str,
+        content: str,
+        *,
+        provider: str | None = None,
+    ) -> int:
+        await self.execute(
+            "INSERT INTO ai_messages (chat_id, role, content, provider) "
+            "VALUES (%s, %s, %s, %s)",
+            (chat_id, role, content, provider),
+        )
+        if self._backend == "sqlite":
+            row = await self.fetch_one("SELECT last_insert_rowid() AS id")
+            return int(row["id"]) if row else 0
+        # MySQL returns lastrowid through the cursor; fetch the latest by
+        # chat/time instead of reaching into the cursor abstraction.
+        row = await self.fetch_one(
+            "SELECT id FROM ai_messages WHERE chat_id = %s "
+            "ORDER BY id DESC LIMIT 1",
+            (chat_id,),
+        )
+        return int(row["id"]) if row else 0
+
+    async def recent_ai_messages(
+        self, chat_id: int, limit: int = 20
+    ) -> list[AIMessage]:
+        rows = await self.fetch_all(
+            "SELECT id, chat_id, role, content, provider, created_at FROM "
+            "(SELECT * FROM ai_messages WHERE chat_id = %s ORDER BY id DESC "
+            "LIMIT %s) ORDER BY id ASC",
+            (chat_id, limit),
+        )
+        return [
+            AIMessage(
+                id=int(r["id"]),
+                chat_id=int(r["chat_id"]),
+                role=r["role"],
+                content=r["content"],
+                provider=r.get("provider"),
+                created_at=_as_aware(r.get("created_at")),
+            )
+            for r in rows
+        ]
+
+    async def count_ai_messages(self, chat_id: int) -> int:
+        row = await self.fetch_one(
+            "SELECT COUNT(*) AS n FROM ai_messages WHERE chat_id = %s",
+            (chat_id,),
+        )
+        return int(row["n"]) if row else 0
+
+    async def clear_ai_messages(self, chat_id: int) -> int:
+        return await self.execute(
+            "DELETE FROM ai_messages WHERE chat_id = %s", (chat_id,)
+        )
+
+    async def prune_ai_messages(self, chat_id: int, keep: int) -> int:
+        if keep < 0:
+            keep = 0
+        if self._backend == "sqlite":
+            return await self.execute(
+                "DELETE FROM ai_messages WHERE chat_id = %s AND id NOT IN "
+                "(SELECT id FROM (SELECT id FROM ai_messages WHERE chat_id = %s "
+                "ORDER BY id DESC LIMIT %s))",
+                (chat_id, chat_id, keep),
+            )
+        return await self.execute(
+            "DELETE m FROM ai_messages m LEFT JOIN ("
+            "  SELECT id FROM ai_messages WHERE chat_id = %s "
+            "  ORDER BY id DESC LIMIT %s"
+            ") keep ON m.id = keep.id "
+            "WHERE m.chat_id = %s AND keep.id IS NULL",
+            (chat_id, keep, chat_id),
+        )
+
+    # -- generic settings --------------------------------------------------
+
+    async def get_setting(self, key: str, default: Any = None) -> Any:
+        import json
+
+        row = await self.fetch_one(
+            "SELECT value FROM app_settings WHERE key = %s", (key,)
+        )
+        if row is None:
+            return default
+        try:
+            return json.loads(row["value"])
+        except (ValueError, TypeError):
+            return row["value"]
+
+    async def set_setting(self, key: str, value: Any) -> None:
+        import json
+
+        serialized = value if isinstance(value, str) else json.dumps(value)
+        exists = await self.fetch_one(
+            "SELECT 1 FROM app_settings WHERE key = %s", (key,)
+        )
+        if exists:
+            await self.execute(
+                "UPDATE app_settings SET value = %s WHERE key = %s",
+                (serialized, key),
+            )
+        else:
+            await self.execute(
+                "INSERT INTO app_settings (key, value) VALUES (%s, %s)",
+                (key, serialized),
+            )
+
+    async def delete_setting(self, key: str) -> int:
+        return await self.execute(
+            "DELETE FROM app_settings WHERE key = %s", (key,)
+        )
+
+    async def all_settings(self) -> dict[str, Any]:
+        import json
+
+        rows = await self.fetch_all("SELECT key, value FROM app_settings")
+        out: dict[str, Any] = {}
+        for row in rows:
+            try:
+                out[row["key"]] = json.loads(row["value"])
+            except (ValueError, TypeError):
+                out[row["key"]] = row["value"]
+        return out
+
+    # -- external plugin state --------------------------------------------
+
+    async def list_plugin_state(self) -> list[dict[str, Any]]:
+        rows = await self.fetch_all(
+            "SELECT name, source, version, enabled, loaded_at, created_at "
+            "FROM plugin_state ORDER BY name"
+        )
+        return [
+            {
+                "name": r["name"],
+                "source": r["source"],
+                "version": r.get("version"),
+                "enabled": bool(r.get("enabled", 1)),
+                "loaded_at": _as_aware(r.get("loaded_at")),
+                "created_at": _as_aware(r.get("created_at")),
+            }
+            for r in rows
+        ]
+
+    async def get_plugin_state(self, name: str) -> dict[str, Any] | None:
+        row = await self.fetch_one(
+            "SELECT name, source, version, enabled, loaded_at FROM "
+            "plugin_state WHERE name = %s",
+            (name,),
+        )
+        if row is None:
+            return None
+        return {
+            "name": row["name"],
+            "source": row["source"],
+            "version": row.get("version"),
+            "enabled": bool(row.get("enabled", 1)),
+            "loaded_at": _as_aware(row.get("loaded_at")),
+        }
+
+    async def set_plugin_state(
+        self,
+        name: str,
+        source: str,
+        *,
+        version: str | None = None,
+        enabled: bool = True,
+    ) -> None:
+        exists = await self.fetch_one(
+            "SELECT 1 FROM plugin_state WHERE name = %s", (name,)
+        )
+        if exists:
+            await self.execute(
+                "UPDATE plugin_state SET source = %s, version = %s, "
+                "enabled = %s WHERE name = %s",
+                (source, version, 1 if enabled else 0, name),
+            )
+        else:
+            await self.execute(
+                "INSERT INTO plugin_state (name, source, version, enabled) "
+                "VALUES (%s, %s, %s, %s)",
+                (name, source, version, 1 if enabled else 0),
+            )
+
+    async def set_plugin_enabled(self, name: str, enabled: bool) -> int:
+        return await self.execute(
+            "UPDATE plugin_state SET enabled = %s WHERE name = %s",
+            (1 if enabled else 0, name),
+        )
+
+    async def delete_plugin_state(self, name: str) -> int:
+        return await self.execute(
+            "DELETE FROM plugin_state WHERE name = %s", (name,)
+        )
+
+    # -- backup / restore --------------------------------------------------
+
+    async def export_rows(self) -> dict[str, list[dict[str, Any]]]:
+        """Dump user-managed tables for the backup command.
+
+        Provider API keys are left to the caller to redact/encrypt; raw keys
+        come through decrypted so an explicitly-authorized backup can include
+        them.
+        """
+        tables: dict[str, str] = {
+            "users": "SELECT id, role, username, added_at FROM users",
+            "channel_reactions": "SELECT channel, emoji FROM channel_reactions",
+            "quick_replies": (
+                "SELECT user_id, alias, message, created_at FROM quick_replies"
+            ),
+            "auto_replies": (
+                "SELECT chat_id, mode, trigger_text, reply_text, "
+                "reply_condition, created_at FROM auto_replies"
+            ),
+            "welcomes": (
+                "SELECT chat_id, message, enabled, created_at FROM welcomes"
+            ),
+            "timers": (
+                "SELECT hash, user_id, chat_id, title, duration_seconds, "
+                "end_time, message_id, is_active, created_at FROM timers "
+                "WHERE is_active = 1"
+            ),
+            "sticker_packs": (
+                "SELECT name, title, owner_id, created_at FROM sticker_packs"
+            ),
+            "app_settings": "SELECT key, value FROM app_settings",
+            "plugin_state": (
+                "SELECT name, source, version, enabled, loaded_at, created_at "
+                "FROM plugin_state"
+            ),
+        }
+        dump: dict[str, list[dict[str, Any]]] = {}
+        for label, query in tables.items():
+            dump[label] = [dict(r) for r in await self.fetch_all(query)]
+
+        providers = []
+        for row in await self.fetch_all(
+            "SELECT id, name, base_url, api_key, model, kind, is_default, "
+            "enabled, created_at FROM ai_providers ORDER BY id"
+        ):
+            row = dict(row)
+            row["api_key"] = self._decrypt(row.get("api_key", ""))
+            providers.append(row)
+        dump["ai_providers"] = providers
+        return dump

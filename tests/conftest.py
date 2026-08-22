@@ -12,6 +12,7 @@ import pytest
 from selfbot.config import (
     AIConfig,
     Config,
+    HealthConfig,
     SpamConfig,
     StickerConfig,
     SupervisorConfig,
@@ -36,6 +37,7 @@ def config(tmp_path: Path) -> Config:
         ),
         spam=SpamConfig(delay=0.0, limit=10, cooldown=0.0),
         ai=AIConfig(rapidapi_key="test-rapidapi-key"),
+        health=HealthConfig(port=None),
         sudo_user_id=SUDO_ID,
         database_url=f"sqlite+aiosqlite:///{tmp_path / 'test.db'}",
         data_dir=tmp_path,

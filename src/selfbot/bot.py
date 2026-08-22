@@ -26,6 +26,7 @@ from .errors import ConfigError
 from .logging_setup import TelegramLogHandler
 from .registry import CommandRegistry
 from .registry import registry as global_registry
+from .security import SecretBox
 from .utils.files import cleanup_old_files
 from .utils.http import close_client, get_client
 from .utils.text import TELEGRAM_LIMIT, chunk_text
@@ -53,6 +54,24 @@ class SelfBot:
         self.config = config
         self.registry = registry or global_registry
         self.db = db or Database(config.database_url)
+        # Encrypt API keys and other secrets stored in the database. If the
+        # cryptography package is unavailable we continue without encryption
+        # rather than refusing to start.
+        secrets = SecretBox(config.secret_key_path)
+        if secrets.is_available():
+            self.db.attach_secrets(secrets)
+            self.secrets: SecretBox | None = secrets
+        else:
+            logger.warning(
+                "cryptography is not installed; AI API keys in the database "
+                "will be stored unencrypted. `pip install cryptography` to enable."
+            )
+            self.secrets = None
+        # AI, metrics and plugin managers are populated in start(); they are
+        # declared here so handlers can rely on the attributes existing.
+        self.ai: Any = None
+        self.metrics: Any = None
+        self.plugins: Any = None
         self.started_at = time.monotonic()
 
         config.ensure_dirs()
@@ -122,6 +141,12 @@ class SelfBot:
         logger.info("Starting SelfBot…")
         await self.db.connect()
         await self.db.ensure_sudo(self.config.sudo_user_id)
+
+        # First-run: copy any legacy environment AI keys into the database so
+        # operators can move to DB-managed providers without re-entering them.
+        from .services.ai import seed_providers_from_env
+
+        await seed_providers_from_env(self.db, self.config.ai)
 
         self._register_events()
 
