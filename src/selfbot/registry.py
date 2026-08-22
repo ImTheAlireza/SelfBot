@@ -219,13 +219,20 @@ class CommandRegistry:
             command=head.lower(),
         )
 
+        metrics = getattr(bot, "metrics", None)
         try:
             await self._invoke(command, ctx)
+            if metrics is not None:
+                metrics.incr("commands_run")
         except CommandError as exc:
+            if metrics is not None:
+                metrics.incr("commands_failed")
             await _safe_reply(ctx, exc.user_message())
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            if metrics is not None:
+                metrics.incr("commands_failed")
             logger.exception("Unhandled error in command %s", command.name)
             await _safe_reply(
                 ctx,

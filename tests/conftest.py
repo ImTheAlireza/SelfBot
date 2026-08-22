@@ -20,6 +20,7 @@ from selfbot.config import (
 )
 from selfbot.db import Database
 from selfbot.registry import CommandRegistry, Context
+from selfbot.services.metrics import Metrics
 
 SUDO_ID = 4242
 
@@ -199,7 +200,8 @@ class FakeBot:
         self.confirm_prompts: list[str] = []
         self.http = None
         self.ai = None
-        self.metrics = None
+        self.metrics = Metrics()
+        self.metrics.attach(self)
         self.plugins = None
         self._auto_reply_cache: dict[int, list[Any]] = {}
         self.auto_reply_cache_invalidated: list[int | None] = []

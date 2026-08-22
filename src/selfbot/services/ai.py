@@ -488,7 +488,15 @@ class AIManager:
         messages.append({"role": "user", "content": prompt})
         messages = _apply_budget(messages, self.config.memory_budget)
 
-        answer = await self._complete_chain(messages, model=model)
+        metrics = getattr(self.bot, "metrics", None)
+        if metrics is not None:
+            metrics.incr("ai_requests")
+        try:
+            answer = await self._complete_chain(messages, model=model)
+        except Exception:
+            if metrics is not None:
+                metrics.incr("ai_failures")
+            raise
         # Determine who answered (best effort) for memory attribution.
         used_provider = self._last_provider or ""
 
@@ -613,6 +621,10 @@ class AIManager:
         fallback: bool,
     ) -> None:
         message = str(exc)
+        metrics = getattr(self.bot, "metrics", None)
+        if metrics is not None:
+            status = getattr(exc, "status", None)
+            metrics.record_failure(f"ai:{provider.name}", message, status=status)
         await self.db.record_provider_result(
             provider.name, success=False, error=message
         )
