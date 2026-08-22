@@ -10,6 +10,7 @@ imports keep working unchanged.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from ..errors import FeatureDisabledError, UsageError, ValidationError
@@ -101,13 +102,300 @@ async def cmd_gpt(ctx: Context) -> None:
             "ANYAPI_KEY / BLUESMINDS_API_KEY / RAPIDAPI_KEY in your `.env`."
         )
 
+    # Reply-to context: when the command is a reply, feed the quoted message
+    # in as context so the answer directly addresses it.
+    if ctx.event.is_reply:
+        replied = await ctx.get_reply_message()
+        quoted = (getattr(replied, "raw_text", "") or "").strip()
+        if quoted:
+            instruction = prompt
+            prompt = (
+                "Message being replied to:\n"
+                f"\"\"\"\n{truncate(quoted, 6000)}\n\"\"\"\n\n"
+                f"Instruction: {instruction}"
+            )
+
+    memory_on = await _memory_enabled(ctx, manager)
     status = await ctx.reply("🤖 Thinking…")
     try:
-        answer = await manager.chat(prompt, history=False)
+        answer = await manager.chat(
+            prompt, chat_id=ctx.chat_id, history=memory_on
+        )
     finally:
         await _delete_status(status)
 
     await ctx.reply(answer)
+
+
+async def _memory_enabled(ctx: Context, manager: AIManager) -> bool:
+    """Per-chat memory toggle, defaulting on."""
+    if ctx.config.ai.memory_turns <= 0:
+        return False
+    saved = await ctx.db.get_setting(f"ai.memory.{ctx.chat_id}", True)
+    return bool(saved)
+
+
+@command(
+    "gptmemory",
+    category=CATEGORY,
+    sudo_only=False,
+    usage="gptmemory <on|off|clear|turns|status>",
+    examples=("gptmemory off", "gptmemory turns 6", "gptmemory clear"),
+)
+async def cmd_gptmemory(ctx: Context) -> None:
+    """Control per-chat AI conversation memory."""
+    if not ctx.args:
+        raise UsageError(
+            "Usage: `gptmemory <on|off|clear|turns <n>|status>`"
+        )
+
+    manager = get_manager(ctx)
+    action = ctx.args[0].lower()
+
+    if action == "on":
+        await ctx.db.set_setting(f"ai.memory.{ctx.chat_id}", True)
+        await ctx.reply("✅ AI memory is **on** for this chat.")
+    elif action == "off":
+        await ctx.db.set_setting(f"ai.memory.{ctx.chat_id}", False)
+        await ctx.reply("⏸ AI memory is **off** for this chat.")
+    elif action == "clear":
+        removed = await ctx.db.clear_ai_messages(ctx.chat_id)
+        await ctx.reply(f"🗑 Cleared {removed} remembered message(s) for this chat.")
+    elif action == "turns":
+        if len(ctx.args) < 2 or not ctx.args[1].isdigit():
+            raise UsageError("Usage: `gptmemory turns <4..50>`")
+        turns = int(ctx.args[1])
+        if not 1 <= turns <= 50:
+            raise ValidationError("Turns must be between 1 and 50.")
+        await ctx.db.set_setting("ai.memory_turns", turns)
+        await ctx.reply(f"✅ Memory window set to {turns} turns.")
+    elif action == "status":
+        enabled = await _memory_enabled(ctx, manager)
+        turns = await ctx.db.get_setting("ai.memory_turns", ctx.config.ai.memory_turns)
+        stored = await ctx.db.count_ai_messages(ctx.chat_id)
+        await ctx.reply(
+            f"🧠 **AI memory**\n"
+            f"State: {'🟢 on' if enabled else '🔴 off'}\n"
+            f"Window: {turns} turns\n"
+            f"Stored messages in this chat: {stored}"
+        )
+    else:
+        raise ValidationError(
+            f"Unknown action `{action}`. Try on/off/clear/turns/status."
+        )
+
+
+@command(
+    "gptedit",
+    category=CATEGORY,
+    sudo_only=True,
+    requires_reply=True,
+    usage="gptedit [instruction]",
+    examples=("gptedit make it more formal", "gptedit translate to English"),
+)
+async def cmd_gptedit(ctx: Context) -> None:
+    """Rewrite one of your own messages with AI, editing it in place."""
+    replied = await ctx.get_reply_message()
+    if replied is None:
+        raise ValidationError("Reply to a message to rewrite it.")
+
+    my_id = getattr(ctx.bot.me, "id", None)
+    if my_id is not None and getattr(replied, "sender_id", None) != my_id:
+        raise ValidationError(
+            "You can only rewrite **your own** messages with `gptedit`."
+        )
+
+    original = (getattr(replied, "raw_text", "") or "").strip()
+    if not original:
+        raise ValidationError("The replied message has no text to rewrite.")
+
+    instruction = ctx.raw_args.strip() or "Improve the wording while keeping the meaning."
+    prompt = (
+        "Rewrite the following message. Return ONLY the rewritten message, "
+        "with no explanation, no quotes, and no preamble.\n\n"
+        f"Instruction: {instruction}\n\n"
+        f"Message:\n\"\"\"\n{truncate(original, 6000)}\n\"\"\""
+    )
+
+    status = await ctx.reply("🤖 Rewriting…")
+    manager = get_manager(ctx)
+    try:
+        rewritten = await manager.chat(prompt, history=False)
+    finally:
+        await _delete_status(status)
+
+    # Edit the original message; the command message itself is removed so the
+    # chat looks as though the answer was authored directly.
+    try:
+        await ctx.bot.edit(replied, rewritten)
+    except Exception as exc:
+        await ctx.reply(f"❌ Could not edit the message: `{exc}`")
+        return
+
+    try:
+        await ctx.event.delete()
+    except Exception:
+        logger.debug("Could not delete the gptedit command message", exc_info=True)
+
+
+# --------------------------------------------------------------------------
+# summarize
+# --------------------------------------------------------------------------
+
+
+@command(
+    "summarize",
+    category=CATEGORY,
+    usage="summarize [n] [--lang en|fa] [--brief|--detailed]",
+    examples=("summarize", "summarize 50 --brief", "summarize --lang fa"),
+)
+async def cmd_summarize(ctx: Context) -> None:
+    """Summarize a replied message, document, or the last N messages."""
+    args = list(ctx.args)
+    brief = "--brief" in args
+    detailed = "--detailed" in args
+    args = [a for a in args if a not in {"--brief", "--detailed"}]
+
+    lang = None
+    if "--lang" in args:
+        idx = args.index("--lang")
+        if idx + 1 >= len(args):
+            raise UsageError("Usage: `summarize ... --lang en|fa`")
+        lang = args.pop(idx + 1).lower()
+        args.pop(idx)
+        if lang not in {"en", "fa", "english", "persian", "farsi"}:
+            raise ValidationError("Language must be `en` or `fa`.")
+
+    count = 0
+    if args and args[0].isdigit():
+        count = int(args.pop(0))
+        if not 1 <= count <= 500:
+            raise ValidationError("Count must be between 1 and 500.")
+    if args:
+        raise UsageError(
+            "Usage: `summarize [n] [--lang en|fa] [--brief|--detailed]`"
+        )
+
+    manager = get_manager(ctx)
+    providers = await manager.providers(enabled_only=True)
+    if not providers:
+        from ..errors import FeatureDisabledError
+
+        raise FeatureDisabledError(
+            "No AI provider is configured. Add one with "
+            "`provider add <name> <base_url> <api_key> [model]`."
+        )
+
+    text, label = await _collect_summary_text(ctx, count)
+    if not text.strip():
+        raise ValidationError("Nothing to summarize.")
+
+    budget = 30000
+    if len(text) > budget:
+        text = text[:budget] + "\n…[truncated]"
+
+    style = (
+        "Write a detailed summary in paragraphs, covering the key points."
+        if detailed
+        else "Write a concise summary as a short bullet list."
+        if brief
+        else "Write a concise summary with the key points in a few bullets."
+    )
+    if lang in {"fa", "persian", "farsi"}:
+        style += " Respond in Persian (Farsi)."
+    elif lang in {"en", "english"}:
+        style += " Respond in English."
+
+    prompt = (
+        f"You are a summarization assistant. {style}\n\n"
+        f"Content ({label}):\n\"\"\"\n{text}\n\"\"\""
+    )
+
+    status = await ctx.reply("📝 Summarizing…")
+    try:
+        summary = await manager.chat(prompt, history=False)
+    finally:
+        await _delete_status(status)
+    await ctx.reply(f"📝 **Summary** ({label})\n\n{summary}")
+
+
+async def _collect_summary_text(ctx: Context, count: int) -> tuple[str, str]:
+    """Return (text, label) from a reply/document or the last ``count`` messages."""
+    replied = await ctx.get_reply_message() if ctx.event.is_reply else None
+
+    if count > 0:
+        return await _conversation_text(ctx, count)
+
+    if replied is None:
+        raise UsageError(
+            "Reply to a message or document, or use `summarize <n>`."
+        )
+
+    # 1. A text-bearing message.
+    raw = (getattr(replied, "raw_text", "") or "").strip()
+    if raw and not (replied.photo or replied.document):
+        return raw, "replied message"
+
+    # 2. A document — download and extract.
+    if replied.document or replied.photo:
+        from pathlib import Path
+
+        from ..utils.files import temp_workspace
+
+        with temp_workspace(parent=ctx.config.downloads_dir) as workspace:
+            path = Path(await replied.download_media(file=str(workspace)))
+            extracted = _extract_document_text(path)
+        if extracted:
+            return extracted, path.name
+
+    if raw:
+        return raw, "replied message"
+
+    raise ValidationError("Could not extract any text from that message.")
+
+
+async def _conversation_text(ctx: Context, count: int) -> tuple[str, str]:
+    lines: list[str] = []
+    seen = 0
+    async for message in ctx.client.iter_messages(ctx.chat_id, limit=count):
+        text = (getattr(message, "raw_text", "") or "").strip()
+        if not text:
+            continue
+        sender = await message.get_sender()
+        name = (
+            getattr(sender, "first_name", None)
+            or getattr(sender, "username", None)
+            or str(getattr(message, "sender_id", "?"))
+        )
+        lines.append(f"{name}: {text}")
+        seen += 1
+    lines.reverse()  # chronological order
+    return "\n".join(lines), f"last {seen} messages"
+
+
+def _extract_document_text(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in {".txt", ".md", ".csv", ".log", ".json", ".xml", ".html", ".py", ""}:
+        try:
+            return path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return ""
+    if suffix == ".pdf":
+        try:
+            import pypdf
+
+            reader = pypdf.PdfReader(str(path))
+            return "\n".join(
+                (page.extract_text() or "") for page in reader.pages
+            ).strip()
+        except Exception as exc:
+            logger.debug("PDF extraction failed: %s", exc)
+            return ""
+    # Fall back to a best-effort text decode.
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
 
 
 # --------------------------------------------------------------------------
