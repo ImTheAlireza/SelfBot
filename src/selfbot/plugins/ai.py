@@ -625,6 +625,13 @@ async def _ai_add(ctx: Context, manager: AIManager, args: list[str]) -> None:
     if len(api_key) < 4:
         raise ValidationError("That API key looks too short.")
 
+    # Normalize: an OpenAI-compatible endpoint given as a bare host (no path
+    # after the hostname) almost always serves under /v1. Append it so users
+    # don't have to remember the suffix; providers that serve at root are
+    # unaffected because the completion path becomes <root>/chat/completions.
+    base_url = _normalize_base_url(base_url)
+    corrected = base_url != (parsed["base_url"] or "").rstrip("/")
+
     existing = await ctx.db.get_provider(name)
     make_default = existing is None and await ctx.db.count_providers() == 0
 
@@ -647,8 +654,9 @@ async def _ai_add(ctx: Context, manager: AIManager, args: list[str]) -> None:
         f"Set its model with `ai model {name}/<model>` "
         "or switch defaults with `ai default <name>`."
     )
+    note = "\n💡 Added `/v1` to the base URL automatically." if corrected else ""
     await ctx.reply(
-        f"✅ Added provider `{name}` at `{base_url.rstrip('/')}`{suffix}.\n{hint}"
+        f"✅ Added provider `{name}` at `{base_url.rstrip('/')}`{suffix}.{note}\n{hint}"
     )
 
 
@@ -744,6 +752,21 @@ def _name_from_url(url: str) -> str:
     if len(parts) >= 2 and parts[0] in {"api", "www", "openai"}:
         parts = parts[1:]
     return parts[0] if parts else host
+
+
+def _normalize_base_url(url: str) -> str:
+    """Append /v1 when an OpenAI-compatible URL is given as a bare host.
+
+    A path of just "/" or "" has no API version, so we add /v1. Any other
+    explicit path (e.g. /v1, /api) is left untouched.
+    """
+    from urllib.parse import urlparse
+
+    url = url.rstrip("/")
+    parsed = urlparse(url)
+    if parsed.path in ("", "/"):
+        return f"{url}/v1"
+    return url
 
 
 async def _ai_toggle(

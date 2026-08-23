@@ -421,3 +421,88 @@ def test_name_from_url() -> None:
     assert _name_from_url("https://api.agentrouter.org/v1") == "agentrouter"
     assert _name_from_url("https://api.openai.com/v1") == "openai"
     assert _name_from_url("https://www.example.com/") == "example"
+
+
+# --------------------------------------------------------------------------
+# Base URL normalization and smart provider test
+# --------------------------------------------------------------------------
+
+
+def test_normalize_base_url_appends_v1_to_bare_host() -> None:
+    from selfbot.plugins.ai import _normalize_base_url
+
+    assert _normalize_base_url("https://agentrouter.org") == "https://agentrouter.org/v1"
+    assert _normalize_base_url("https://agentrouter.org/") == "https://agentrouter.org/v1"
+    assert _normalize_base_url("https://api.openai.com/v1") == "https://api.openai.com/v1"
+    assert _normalize_base_url("https://host/custom") == "https://host/custom"
+
+
+async def test_test_provider_tries_v1_fallback_and_corrects(db) -> None:
+    from selfbot.services.ai import AIManager
+
+    await db.add_provider(
+        "agentrouter", "https://agentrouter.org", "sk-test", is_default=True
+    )
+
+    calls: list[str] = []
+
+    class _Resp:
+        def __init__(self, status, payload):
+            self.status = status
+            self._payload = payload
+
+        async def text(self):
+            import json
+
+            return json.dumps(self._payload)
+
+        async def json(self, content_type=None):
+            return self._payload
+
+    class _Http:
+        async def request(self, method, url, **kwargs):
+            calls.append(url)
+            # First call to /models 404s; /v1/models works.
+            if url.endswith("/v1/models"):
+                return _Resp(200, {"data": [{"id": "claude-opus-4-6"}]})
+            return _Resp(404, {"error": "not found"})
+
+    class _Bot:
+        def __init__(self):
+            self.db = db
+            self.http = _Http()
+            self.config = types.SimpleNamespace(ai=_ai_config())
+            self.metrics = None
+
+    manager = AIManager(_Bot())
+    ok, detail = await manager.test_provider("agentrouter")
+    assert ok, detail
+    assert any(u.endswith("/v1/models") for u in calls)
+    assert "Auto-corrected" in detail
+    fixed = await db.get_provider("agentrouter")
+    assert fixed is not None and fixed.base_url == "https://agentrouter.org/v1"
+
+
+async def test_test_provider_timeout_hints_at_v1(db) -> None:
+    from selfbot.services.ai import AIManager
+
+    await db.add_provider("x", "https://unreachable.example", "sk-test")
+
+    class _Timeout(Exception):
+        pass
+
+    class _Http:
+        async def request(self, *a, **k):
+            raise _Timeout("Request to unreachable.example timed out after 30s")
+
+    class _Bot:
+        def __init__(self):
+            self.db = db
+            self.http = _Http()
+            self.config = types.SimpleNamespace(ai=_ai_config())
+            self.metrics = None
+
+    manager = AIManager(_Bot())
+    ok, detail = await manager.test_provider("x")
+    assert not ok
+    assert "/v1" in detail or "timed out" in detail.lower()

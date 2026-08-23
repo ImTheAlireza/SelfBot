@@ -427,7 +427,12 @@ class AIManager:
         self._models_cache.pop(name, None)
 
     async def test_provider(self, name: str) -> tuple[bool, str]:
-        """Cheap connectivity probe. Returns ``(ok, detail)``."""
+        """Connectivity probe. Returns ``(ok, detail)``.
+
+        Tries the configured base URL first, then common variants (``/v1``)
+        so a provider added without the path suffix is detected and
+        corrected automatically.
+        """
         provider = await self.db.get_provider(name)
         if provider is None:
             return False, "not configured"
@@ -435,19 +440,43 @@ class AIManager:
             return True, "key present (live test skipped for this provider type)"
         if not provider.api_key:
             return False, "no API key"
-        url = f"{provider.base_url.rstrip('/')}/models"
-        try:
-            response = await self.http.request(
-                "GET",
-                url,
-                headers={"Authorization": f"Bearer {provider.api_key}"},
-                timeout=15,
-                retries=0,
-            )
-            if response.status >= 400:
-                body = (await response.text())[:120]
-                return False, f"HTTP {response.status}: {body}"
-            payload = await response.json(content_type=None)
+
+        base = provider.base_url.rstrip("/")
+        candidates = [base]
+        if not base.endswith("/v1"):
+            candidates.append(f"{base}/v1")
+
+        last_error = ""
+        for candidate in candidates:
+            url = f"{candidate}/models"
+            try:
+                response = await self.http.request(
+                    "GET",
+                    url,
+                    headers={"Authorization": f"Bearer {provider.api_key}"},
+                    timeout=30,
+                    retries=0,
+                )
+                if response.status >= 400:
+                    body = (await response.text())[:160].strip()
+                    last_error = f"HTTP {response.status}: {body or '(no body)'}"
+                    if response.status in (404, 405) and candidate != candidates[-1]:
+                        continue
+                    return False, last_error
+                payload = await response.json(content_type=None)
+            except Exception as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+                if candidate != candidates[-1]:
+                    continue
+                hint = ""
+                if "timed out" in last_error.lower():
+                    hint = (
+                        " — the host did not respond. Check the base URL "
+                        "(OpenAI-compatible routers usually need /v1) and "
+                        "that the API is reachable from this server."
+                    )
+                return False, last_error + hint
+
             models = []
             if isinstance(payload, Mapping):
                 data = payload.get("data")
@@ -458,9 +487,18 @@ class AIManager:
                         if isinstance(m, Mapping) and m.get("id")
                     ]
             self._models_cache[name] = (time.time(), models)
-            return True, f"ok — {len(models)} models available"
-        except Exception as exc:
-            return False, f"{type(exc).__name__}: {exc}"
+
+            if candidate != base:
+                await self.db.update_provider(name, base_url=candidate)
+                self.invalidate()
+                return (
+                    True,
+                    f"ok - {len(models)} models. Auto-corrected base URL "
+                    f"to `{candidate}` (added /v1).",
+                )
+            return True, f"ok - {len(models)} models available"
+
+        return False, last_error or "unknown error"
 
     # -- completion -------------------------------------------------------
 
