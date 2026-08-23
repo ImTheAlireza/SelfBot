@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import pytest
@@ -180,3 +181,69 @@ async def test_plugin_install_requires_trust(bot) -> None:
 def test_plugin_meta_dataclass() -> None:
     meta = PluginMeta(name="x", version="2", description="d", author="a")
     assert meta.name == "x" and meta.version == "2"
+
+
+# --------------------------------------------------------------------------
+# Loading a plugin by replying to a .py file
+# --------------------------------------------------------------------------
+
+
+@dataclasses.dataclass
+class _RepliedFile:
+    filename: str
+    source: str
+    document: bool = True
+
+    @property
+    def file(self):
+        return type("F", (), {"name": self.filename})()
+
+    async def download_media(self, file: str) -> str:
+        path = Path(file) / self.filename
+        path.write_text(self.source, encoding="utf-8")
+        return str(path)
+
+
+async def test_plugin_load_replied_py_file(bot, tmp_path, plugin_dir):
+    # plugin_dir is autouse from the existing test file; reuse tmp plugins dir.
+    bot.plugins = None
+    # Point the bot's plugins path at a temp dir.
+    bot.config = dataclasses.replace(bot.config, plugins_dir=tmp_path)
+    source = (
+        "from selfbot.registry import command, Context\n"
+        "@command('hiplugin', category='Demo')\n"
+        "async def _hi(ctx):\n"
+        "    await ctx.reply('hi from file')\n"
+    )
+    replied = _RepliedFile("hiplugin.py", source)
+    event = FakeEvent(raw_text="plugin load", is_reply=True, reply_message=replied)
+    await bot.registry.dispatch(bot, event, "plugin load")
+    text = "\n".join(event.replies)
+    assert "Installed" in text or "Loaded" in text
+    assert "hiplugin" in text
+
+    # The command should now exist and respond.
+    event2 = FakeEvent(raw_text="hiplugin")
+    await bot.registry.dispatch(bot, event2, "hiplugin")
+    assert any("hi from file" in r for r in event2.replies)
+    # File was copied into the plugins directory.
+    assert (tmp_path / "hiplugin.py").exists()
+
+
+async def test_plugin_load_replied_non_py_rejected(bot, tmp_path):
+    bot.config = dataclasses.replace(bot.config, plugins_dir=tmp_path)
+    replied = _RepliedFile("notes.txt", "hello", document=True)
+    event = FakeEvent(raw_text="plugin load", is_reply=True, reply_message=replied)
+    await bot.registry.dispatch(bot, event, "plugin load")
+    assert any(".py" in r for r in event.replies)
+
+
+async def test_looks_like_plugin_detects_command(tmp_path):
+    from selfbot.plugins.plugins_cmd import _looks_like_plugin
+
+    p = tmp_path / "x.py"
+    p.write_text("@command('x')\nasync def f(ctx): ...", encoding="utf-8")
+    assert _looks_like_plugin(p) is True
+    p2 = tmp_path / "y.py"
+    p2.write_text("x = 1\nprint(x)\n", encoding="utf-8")
+    assert _looks_like_plugin(p2) is False

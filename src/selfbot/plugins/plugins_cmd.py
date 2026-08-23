@@ -48,12 +48,13 @@ async def cmd_plugin(ctx: Context) -> None:
         prefix = ctx.config.command_prefix
         await ctx.reply(
             "🧩 **Plugins**\n\n"
+            "Reply to a `.py` file and say `plugin load` to install it.\n\n"
             f"`{prefix}plugin list` — installed plugins\n"
-            f"`{prefix}plugin load <path>` — add a .py file/package\n"
-            f"`{prefix}plugin reload <name>` — re-import one\n"
+            f"`{prefix}plugin load` — install the replied .py file\n"
+            f"`{prefix}plugin load <path>` — add from a server path\n"
+            f"`{prefix}plugin reload <name>` — re-import after editing\n"
             f"`{prefix}plugin enable|disable <name>`\n"
             f"`{prefix}plugin unload <name>` — remove its commands\n"
-            f"`{prefix}plugin install <git-url|pypi-spec> --trust`\n"
             f"`{prefix}plugin path` — show the plugins directory"
         )
         return
@@ -83,20 +84,56 @@ async def cmd_plugin(ctx: Context) -> None:
         await ctx.reply("\n".join(lines))
 
     elif action == "load":
-        if len(ctx.args) < 2:
-            raise UsageError("Usage: `plugin load <path-to-.py-or-dir>`")
-        target = Path(" ".join(ctx.args[1:]).strip())
+        # Three ways to load:
+        #   1. reply to an uploaded .py file  -> plugin load
+        #   2. a server path                  -> plugin load /path/to/thing.py
+        #   3. a name already in plugins dir  -> plugin load myplugin
+        target_path: Path | None = None
+
+        if ctx.event.is_reply:
+            replied = await ctx.get_reply_message()
+            if replied is not None and (replied.document or replied.file):
+                fname = getattr(getattr(replied, "file", None), "name", "") or ""
+                if not fname.lower().endswith(".py"):
+                    raise ValidationError(
+                        f"The replied file is `{fname or 'not a .py file'}`. "
+                        "Reply to a `.py` plugin file."
+                    )
+                target_path = await _download_replied_plugin(ctx, replied, fname)
+        elif len(ctx.args) >= 2:
+            target_path = Path(" ".join(ctx.args[1:]).strip())
+        else:
+            raise UsageError(
+                "Reply to a `.py` file and say `plugin load`, "
+                "or give a path: `plugin load <path-to-.py>`."
+            )
+
+        if target_path is None:
+            raise UsageError(
+                "Reply to a `.py` file and say `plugin load`, "
+                "or give a path: `plugin load <path-to-.py>`."
+            )
         try:
-            info = await manager.load_path(target)
+            info = await manager.load_path(target_path)
         except FileNotFoundError:
-            raise ValidationError(f"File not found: `{target}`") from None
+            raise ValidationError(f"File not found: `{target_path}`") from None
+
         if info.error:
             await ctx.reply(f"⚠️ Loaded **{info.name}** with error: `{info.error}`")
-        else:
+            return
+        commands = info.commands
+        if not commands and not _looks_like_plugin(target_path):
             await ctx.reply(
-                f"✅ Loaded **{info.name}** ({len(info.commands)} commands: "
-                f"{', '.join(f'`{c}`' for c in info.commands) or 'none'})."
+                f"⚠️ Loaded `{target_path.name}` but it registered no commands "
+                "and has no `setup()` hook — is it a plugin?"
             )
+            return
+        await ctx.reply(
+            f"✅ Installed **{info.name}** ({len(commands)} command"
+            f"{'s' if len(commands) != 1 else ''}: "
+            f"{', '.join(f'`{c}`' for c in commands) or 'setup hook only'}).\n"
+            f"Use `plugin list` to see it or `plugin unload {info.name}` to remove."
+        )
 
     elif action == "reload":
         if len(ctx.args) < 2:
@@ -141,6 +178,46 @@ async def cmd_plugin(ctx: Context) -> None:
             f"Unknown action `{action}`. "
             "Try list/load/reload/unload/enable/disable/install/path."
         )
+
+
+async def _download_replied_plugin(
+    ctx: Context, replied: Any, filename: str
+) -> Path:
+    """Download a replied .py attachment into the plugins directory."""
+    from ..utils.files import temp_workspace
+
+    plugins_dir = Path(ctx.config.plugins_path)
+    await asyncio.to_thread(plugins_dir.mkdir, parents=True, exist_ok=True)
+
+    # Download to a temp location first so a failed/partial download never
+    # leaves a half-written plugin in the watched directory.
+    target = plugins_dir / Path(filename).name
+    with temp_workspace(parent=ctx.config.downloads_dir) as workspace:
+        downloaded = Path(await replied.download_media(file=str(workspace)))
+        if await asyncio.to_thread(target.exists):
+            stem = target.stem
+            existing = await ctx.db.get_plugin_state(stem) if hasattr(
+                ctx.db, "get_plugin_state"
+            ) else None
+            # If it's already a known plugin, overwrite (this is a reload).
+            if existing is None:
+                raise ValidationError(
+                    f"`{target.name}` already exists in the plugins "
+                    "directory. Rename the file or remove the old one first."
+                )
+        data = await asyncio.to_thread(downloaded.read_bytes)
+        await asyncio.to_thread(target.write_bytes, data)
+    return target
+
+
+def _looks_like_plugin(path: Path) -> bool:
+    """Cheap static check: does the file register a command or setup hook?"""
+    try:
+        source = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    markers = ("@command", "def setup(", "async def setup(", "PluginMeta")
+    return any(marker in source for marker in markers)
 
 
 async def _install(ctx: Context, manager: Any) -> None:
