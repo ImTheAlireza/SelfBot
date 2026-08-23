@@ -418,7 +418,8 @@ def _extract_document_text(path: Path) -> str:
     examples=(
         "ai",
         "ai status",
-        "ai add openai https://api.openai.com/v1 sk-xxx gpt-4o-mini",
+        "ai add https://api.openai.com/v1 sk-xxx gpt-4o-mini",
+        "ai add openai https://api.openai.com/v1 sk-xxx",
         "ai default bluesminds",
         "ai model luna",
         "ai model list",
@@ -496,8 +497,9 @@ async def _ai_status(ctx: Context, manager: AIManager, *, verbose: bool) -> None
         prefix = ctx.config.command_prefix
         await ctx.reply(
             "🧠 **No AI providers configured.**\n\n"
-            f"Add one:\n`{prefix}ai add <name> <base_url> <api_key> [model]`\n\n"
-            "Example:\n`ai add openai https://api.openai.com/v1 sk-xxx gpt-4o-mini`"
+            f"Add one — the name is optional and derived from the URL:\n"
+            f"`{prefix}ai add <base_url> <api_key> [model]`\n\n"
+            "Example:\n`ai add https://api.openai.com/v1 sk-xxx gpt-4o-mini`"
         )
         return
 
@@ -595,19 +597,31 @@ async def _ai_model(ctx: Context, manager: AIManager, args: list[str]) -> None:
 
 
 async def _ai_add(ctx: Context, manager: AIManager, args: list[str]) -> None:
-    if len(args) < 3:
-        raise UsageError(
-            "Usage: `ai add <name> <base_url> <api_key> [model]`"
-        )
-    name = args[0].lower()
-    base_url = args[1]
-    api_key = args[2]
-    model = " ".join(args[3:]).strip()
+    parsed = _parse_add_args(args)
 
-    if not name.replace("_", "").replace("-", "").isalnum():
-        raise ValidationError("Provider name may only contain letters, numbers, '-' and '_'.")
+    # _parse_add_args guarantees base_url and api_key are present (it raises
+    # otherwise); narrow for the type-checker.
+    base_url = parsed["base_url"] or ""
+    api_key = parsed["api_key"] or ""
+    name = parsed["name"]
+
+    # Name is optional — derive it from the URL hostname when omitted so the
+    # most natural order (`ai add <url> <key> [model]`) just works.
+    if name is None:
+        name = _name_from_url(base_url)
+    name = name.lower()
+    model = parsed["model"] or ""
+
+    if not name.replace("_", "").replace("-", "").replace(".", "").isalnum():
+        raise ValidationError(
+            f"Couldn't derive a valid provider name from `{name}`. "
+            "Use letters, numbers, '-' or '_'."
+        )
     if not (base_url.startswith("http://") or base_url.startswith("https://")):
-        raise ValidationError("Base URL must start with http:// or https://")
+        raise ValidationError(
+            f"`{base_url}` doesn't look like a URL. "
+            "Example: `ai add https://api.openai.com/v1 sk-xxx`"
+        )
     if len(api_key) < 4:
         raise ValidationError("That API key looks too short.")
 
@@ -616,7 +630,9 @@ async def _ai_add(ctx: Context, manager: AIManager, args: list[str]) -> None:
 
     if existing is not None:
         await ctx.db.update_provider(
-            name, base_url=base_url, api_key=api_key,
+            name,
+            base_url=base_url.rstrip("/"),
+            api_key=api_key,
             model=model or existing.model,
         )
         manager.invalidate()
@@ -627,11 +643,107 @@ async def _ai_add(ctx: Context, manager: AIManager, args: list[str]) -> None:
         name, base_url, api_key, model=model, is_default=make_default
     )
     suffix = " (set as default)" if make_default else ""
-    await ctx.reply(
-        f"✅ Added provider `{name}`{suffix}.\n"
-        f"Set its model with `ai model {name}/<model>` or `ai model <model>` "
-        "to use it on the default provider."
+    hint = (
+        f"Set its model with `ai model {name}/<model>` "
+        "or switch defaults with `ai default <name>`."
     )
+    await ctx.reply(
+        f"✅ Added provider `{name}` at `{base_url.rstrip('/')}`{suffix}.\n{hint}"
+    )
+
+
+def _parse_add_args(args: list[str]) -> dict[str, str | None]:
+    """Identify the URL, API key, optional name and model in any order.
+
+    Accepts either positional tokens or ``--name``/``--model`` flags. The name
+    may be omitted entirely and is then derived from the hostname.
+    """
+    flags: dict[str, str] = {}
+    positional: list[str] = []
+    known_flags = {"--name", "--model"}
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token in known_flags and index + 1 < len(args):
+            flags[token[2:]] = args[index + 1]
+            index += 2
+        else:
+            positional.append(token)
+            index += 1
+
+    base_url: str | None = None
+    api_key: str | None = None
+    before_url: list[str] = []
+    after_key: list[str] = []
+    seen_url = False
+
+    for token in positional:
+        low = token.lower()
+        if base_url is None and (
+            low.startswith("http://") or low.startswith("https://")
+        ):
+            base_url = token
+            seen_url = True
+        elif api_key is None and _looks_like_key(token):
+            api_key = token
+        elif not seen_url:
+            # Tokens before the URL are a custom provider name.
+            before_url.append(token)
+        else:
+            # Anything after the URL/key is the model (may contain spaces).
+            after_key.append(token)
+
+    # Flag always wins; otherwise a name only comes from tokens placed before
+    # the URL. Tokens after the key are the model. This makes the natural
+    # `ai add <url> <key> [model]` order work with no name supplied.
+    name = flags.get("name") or (" ".join(before_url).strip() or None)
+    model = flags.get("model") or " ".join(after_key).strip()
+
+    # Disambiguate a trailing token when it exactly matches the hostname-derived
+    # name (e.g. `ai add https://agentrouter.org sk-... agentrouter`): treat it
+    # as the name rather than an opaque model id.
+    if base_url and not name and after_key:
+        derived = _name_from_url(base_url)
+        trailing = " ".join(after_key).strip().lower()
+        if trailing == derived:
+            name = trailing
+            model = ""
+
+    missing: list[str] = []
+    if base_url is None:
+        missing.append("a URL (e.g. https://api.example.com/v1)")
+    if api_key is None:
+        missing.append("an API key")
+    if missing:
+        raise UsageError(
+            "I need " + " and ".join(missing) + ".\n"
+            "Usage: `ai add [name] <base_url> <api_key> [model]`\n"
+            "The name is optional — it's derived from the URL."
+        )
+
+    return {"name": name, "base_url": base_url, "api_key": api_key, "model": model}
+
+
+def _looks_like_key(token: str) -> bool:
+    """Heuristic: long tokens or ones starting with common key prefixes."""
+    if token.startswith(("sk-", "rk-", "gk-", "pk-", "Bearer ")):
+        return True
+    # Plain long opaque strings (>=20 chars, no spaces) are almost always keys.
+    return len(token) >= 20 and " " not in token and not token.startswith(("http", "-"))
+
+
+def _name_from_url(url: str) -> str:
+    """Derive a provider name from a URL, e.g. https://api.agentrouter.org/v1 → agentrouter."""
+    from urllib.parse import urlparse
+
+    host = (urlparse(url).hostname or "").lower()
+    if not host:
+        return url
+    # Drop the common "api."/"www." prefix and the TLD, keep the brand label.
+    parts = host.split(".")
+    if len(parts) >= 2 and parts[0] in {"api", "www", "openai"}:
+        parts = parts[1:]
+    return parts[0] if parts else host
 
 
 async def _ai_toggle(
@@ -712,74 +824,3 @@ async def cmd_gptmodel_alias(ctx: Context) -> None:
         )
     else:
         raise ValidationError("Try `model list`, `model <name>`, or `model current`.")
-
-
-async def _provider_add(ctx: Context, manager: AIManager) -> None:
-    if len(ctx.args) < 4:
-        raise UsageError(
-            "Usage: `provider add <name> <base_url> <api_key> [model]`"
-        )
-    name = ctx.args[1].lower()
-    base_url = ctx.args[2]
-    api_key = ctx.args[3]
-    model = " ".join(ctx.args[4:]).strip()
-
-    if not name.replace("_", "").replace("-", "").isalnum():
-        raise ValidationError("Provider name may only contain letters, numbers, '-' and '_'.")
-    if not (base_url.startswith("http://") or base_url.startswith("https://")):
-        raise ValidationError("Base URL must start with http:// or https://")
-    if len(api_key) < 4:
-        raise ValidationError("That API key looks too short.")
-
-    existing = await ctx.db.get_provider(name)
-    make_default = existing is None and await ctx.db.count_providers() == 0
-
-    if existing is not None:
-        await ctx.db.update_provider(
-            name, base_url=base_url, api_key=api_key, model=model or existing.model
-        )
-        manager.invalidate()
-        await ctx.reply(f"✅ Updated provider `{name}`.")
-        return
-
-    await manager.add_openai_provider(
-        name, base_url, api_key, model=model, is_default=make_default
-    )
-    suffix = " (set as default)" if make_default else ""
-    await ctx.reply(
-        f"✅ Added provider `{name}` at `{base_url}`{suffix}.\n"
-        "Run `provider test <name>` to verify the key, or `aistatus`."
-    )
-
-
-async def _provider_list(ctx: Context, manager: AIManager) -> None:
-    statuses = await manager.status()
-    if not statuses:
-        await ctx.reply("ℹ️ No providers configured. Use `provider add`.")
-        return
-    lines = ["🧠 **Providers**\n"]
-    for s in statuses:
-        p = s.provider
-        icon = "✅" if s.available else ("⏸" if not p.enabled else "❄️")
-        default = " _(default)_" if p.is_default else ""
-        lines.append(
-            f"{icon} `{p.name}`{default} — `{p.model or 'default'}` "
-            f"· {p.redacted_key}"
-        )
-    await ctx.reply("\n".join(lines))
-
-
-async def _provider_toggle(
-    ctx: Context, manager: AIManager, enabled: bool
-) -> None:
-    if len(ctx.args) < 2:
-        state = "enable" if enabled else "disable"
-        raise UsageError(f"Usage: `provider {state} <name>`")
-    name = ctx.args[1]
-    existing = await ctx.db.get_provider(name)
-    if existing is None:
-        raise ValidationError(f"No provider named `{name}`.")
-    await ctx.db.update_provider(name, enabled=enabled)
-    manager.invalidate()
-    verb = "enabled" if enabled else "disabled"
-    await ctx.reply(f"✅ {verb.capitalize()} provider `{name}`.")

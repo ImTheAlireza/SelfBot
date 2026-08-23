@@ -348,3 +348,76 @@ async def test_gpt_reply_footer_shows_provider_and_model(bot: FakeBot) -> None:
     event = FakeEvent(raw_text="gpt hi")
     await bot.registry.dispatch(bot, event, "gpt hi")
     assert any("via bluesminds" in r and "gpt-luna" in r for r in event.replies)
+
+
+# --------------------------------------------------------------------------
+# Flexible ai add parsing (order-agnostic; name derived from URL)
+# --------------------------------------------------------------------------
+
+
+def test_parse_add_args_url_key_name_order() -> None:
+    from selfbot.plugins.ai import _parse_add_args
+
+    r = _parse_add_args(
+        ["https://agentrouter.org", "sk-iWDv3ks4D9prn1ZzUfG6Rwv26GqXS6D9pXdk", "agentrouter"]
+    )
+    assert r["base_url"] == "https://agentrouter.org"
+    assert r["name"] == "agentrouter"
+    assert r["model"] == ""
+
+
+def test_parse_add_args_url_key_model_no_name() -> None:
+    from selfbot.plugins.ai import _name_from_url, _parse_add_args
+
+    r = _parse_add_args(
+        ["https://agentrouter.org/v1", "sk-iWDv3ks4D9prn1ZzUfG6Rwv26GqXS6D9", "luna"]
+    )
+    assert r["name"] is None
+    assert r["model"] == "luna"
+    assert _name_from_url(r["base_url"]) == "agentrouter"
+
+
+def test_parse_add_args_name_url_key_model() -> None:
+    from selfbot.plugins.ai import _parse_add_args
+
+    r = _parse_add_args(
+        ["openai", "https://api.openai.com/v1", "sk-xxx", "gpt-4o"]
+    )
+    assert r == {
+        "name": "openai",
+        "base_url": "https://api.openai.com/v1",
+        "api_key": "sk-xxx",
+        "model": "gpt-4o",
+    }
+
+
+def test_parse_add_args_minimal_url_key() -> None:
+    from selfbot.plugins.ai import _parse_add_args
+
+    r = _parse_add_args(["https://api.openai.com/v1", "sk-xxx"])
+    assert r["name"] is None and r["model"] == ""
+
+
+def test_parse_add_args_flags() -> None:
+    from selfbot.plugins.ai import _parse_add_args
+
+    r = _parse_add_args(["--model", "luna", "https://x/v1", "sk-xxx"])
+    assert r["model"] == "luna" and r["name"] is None
+
+
+def test_parse_add_args_missing_url() -> None:
+    import pytest
+
+    from selfbot.errors import UsageError
+    from selfbot.plugins.ai import _parse_add_args
+
+    with pytest.raises(UsageError):
+        _parse_add_args(["sk-xxx"])
+
+
+def test_name_from_url() -> None:
+    from selfbot.plugins.ai import _name_from_url
+
+    assert _name_from_url("https://api.agentrouter.org/v1") == "agentrouter"
+    assert _name_from_url("https://api.openai.com/v1") == "openai"
+    assert _name_from_url("https://www.example.com/") == "example"
