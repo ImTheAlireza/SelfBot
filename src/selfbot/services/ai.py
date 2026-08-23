@@ -499,6 +499,7 @@ class AIManager:
             raise
         # Determine who answered (best effort) for memory attribution.
         used_provider = self._last_provider or ""
+        self._last_model = getattr(self, "_last_model", "") or model or ""
 
         if history and chat_id is not None:
             try:
@@ -530,9 +531,9 @@ class AIManager:
                 "ANYAPI_KEY / BLUESMINDS_API_KEY / RAPIDAPI_KEY in your `.env`."
             )
 
-        global_model = await self.db.get_setting("ai.default_model")
         errors: list[str] = []
         self._last_provider = ""
+        self._last_model = ""
 
         for provider in providers:
             if not provider.api_key:
@@ -541,7 +542,7 @@ class AIManager:
                 errors.append(f"{provider.name}: cooling down")
                 continue
 
-            use_model = model or global_model or provider.model or ""
+            use_model = model or provider.model or ""
             try:
                 answer = await self._call(
                     provider, messages=messages, model=use_model
@@ -560,6 +561,7 @@ class AIManager:
             await self.db.record_provider_result(provider.name, success=True)
             self._consecutive_failures.pop(provider.name, None)
             self._last_provider = provider.name
+            self._last_model = use_model
             return answer
 
         detail = "; ".join(errors[-3:]) if errors else "no providers available"
@@ -657,7 +659,7 @@ class AIManager:
         Each entry is ``{"id": str, "providers": [str,...], "current": bool}``.
         Failures are per-provider and never abort the whole listing.
         """
-        current = await self.current_model()
+        current, current_provider = await self.current_model()
         models: dict[str, dict[str, Any]] = {}
         for provider in await self.providers(enabled_only=True):
             if provider.kind != "openai":
@@ -675,7 +677,10 @@ class AIManager:
                 )
                 entry["providers"].append(provider.name)
         for entry in models.values():
-            entry["current"] = entry["id"] == current
+            # Mark current when the id matches and the active provider serves it.
+            entry["current"] = (
+                entry["id"] == current and current_provider in entry["providers"]
+            )
         return sorted(models.values(), key=lambda e: e["id"].lower())
 
     async def _provider_models(self, provider: AIProvider) -> list[str] | None:
@@ -688,31 +693,49 @@ class AIManager:
         cached = self._models_cache.get(provider.name)
         return cached[1] if cached else None
 
-    async def current_model(self) -> str:
-        override = await self.db.get_setting("ai.default_model")
-        if isinstance(override, str) and override:
-            return override
+    async def current_model(self) -> tuple[str, str]:
+        """Return ``(model, provider_name)`` the next call will actually use."""
         default = await self.db.get_default_provider()
         if default and default.model:
-            return default.model
-        # Config-only fallback.
+            return default.model, default.name
+        if default:
+            return f"(provider default · {default.name})", default.name
+        # No DB default at all — synthesised from config.
         if self.config.anyapi_model:
-            return self.config.anyapi_model
-        return ANYAPI_DEFAULT_MODEL
+            return self.config.anyapi_model, "anyapi"
+        return ANYAPI_DEFAULT_MODEL, "anyapi"
 
-    async def set_global_model(self, model: str) -> None:
+    async def set_active_model(self, model: str) -> tuple[str, str]:
+        """Set the model on the current default provider.
+
+        ``provider/model`` targets a specific provider instead of the default.
+        Returns ``(model, provider_name)`` actually set.
+        """
         model = model.strip()
         if not model:
             raise ValueError("model must not be empty")
-        if "/" in model and not model.startswith("openai/"):
-            # Allow "provider/model" to also update that provider's model.
-            provider_name, _, per_provider = model.partition("/")
-            await self.db.update_provider(provider_name, model=per_provider)
-            self.invalidate()
-        await self.db.set_setting("ai.default_model", model)
 
-    async def clear_global_model(self) -> None:
-        await self.db.delete_setting("ai.default_model")
+        provider_name: str | None = None
+        if "/" in model:
+            provider_name, _, model = model.partition("/")
+            provider_name = provider_name.strip().lower()
+            model = model.strip()
+            existing = await self.db.get_provider(provider_name)
+            if existing is None:
+                raise KeyError(provider_name)
+        else:
+            default = await self.db.get_default_provider()
+            if default is not None:
+                provider_name = default.name
+
+        if provider_name is None:
+            # No provider configured in the DB yet — store as a setting that
+            # seed_providers_from_env will apply on first connection.
+            await self.db.set_setting("ai.initial_model", model)
+            return model, "(pending)"
+
+        await self.set_provider_model(provider_name, model)
+        return model, provider_name
 
 
 # --------------------------------------------------------------------------
@@ -792,6 +815,7 @@ async def seed_providers_from_env(db: Any, ai: AIConfig) -> int:
         return 0
 
     seeded = 0
+    initial_model = await db.get_setting("ai.initial_model")
     if ai.anyapi_key:
         await db.add_provider(
             "anyapi",
@@ -801,6 +825,8 @@ async def seed_providers_from_env(db: Any, ai: AIConfig) -> int:
             kind="openai",
             is_default=True,
         )
+        if initial_model:
+            await db.update_provider("anyapi", model=str(initial_model))
         seeded += 1
     if ai.bluesminds_key:
         await db.add_provider(

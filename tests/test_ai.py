@@ -73,7 +73,8 @@ async def test_gpt_uses_anyapi_when_configured(bot, registry):
 
     assert await registry.dispatch(bot, event, event.raw_text)
 
-    assert event.replies == ["🤖 Thinking…", "Hi from AnyAPI!"]
+    assert event.replies[0] == "🤖 Thinking…"
+    assert event.replies[-1].startswith("Hi from AnyAPI!")
     method, url, kwargs = bot.http.calls[0]
     assert method == "POST"
     assert url == f"{ANYAPI_DEFAULT_BASE_URL}/chat/completions"
@@ -135,7 +136,7 @@ async def test_gpt_falls_back_to_rapidapi_when_anyapi_rate_limited(bot, registry
 
     await registry.dispatch(bot, event, event.raw_text)
 
-    assert event.replies[-1] == "RapidAPI fallback answer"
+    assert event.replies[-1].startswith("RapidAPI fallback answer")
     assert len(bot.http.calls) == 2
     assert bot.http.calls[0][1] == f"{ANYAPI_DEFAULT_BASE_URL}/chat/completions"
     assert bot.http.calls[1][1] == RAPIDAPI_CHAT_URL
@@ -173,7 +174,7 @@ async def test_gpt_requires_anyapi_or_rapidapi_key(bot, registry):
 
     await registry.dispatch(bot, event, event.raw_text)
 
-    assert any("ANYAPI_KEY" in reply for reply in event.replies)
+    assert any("ai add" in reply or "ANYAPI_KEY" in reply for reply in event.replies)
 
 
 @pytest.mark.asyncio
@@ -185,7 +186,8 @@ async def test_gpt_sends_prompt_to_rapidapi(bot, registry):
 
     assert await registry.dispatch(bot, event, event.raw_text)
 
-    assert event.replies == ["🤖 Thinking…", "Forty-two."]
+    assert event.replies[0] == "🤖 Thinking…"
+    assert event.replies[-1].startswith("Forty-two.")
     method, url, kwargs = bot.http.calls[0]
     assert method == "POST"
     assert url == RAPIDAPI_CHAT_URL
@@ -217,7 +219,7 @@ async def test_gpt_uses_backup_api_when_primary_is_rate_limited(bot, registry):
 
     await registry.dispatch(bot, event, event.raw_text)
 
-    assert event.replies[-1] == "Backup answer"
+    assert event.replies[-1].startswith("Backup answer")
     assert len(bot.http.calls) == 2
     method, url, kwargs = bot.http.calls[1]
     assert method == "POST"
@@ -249,7 +251,7 @@ async def test_gpt_preserves_prompt_spacing_without_environment_config(bot, regi
 
     request = bot.http.calls[0][2]["json"]
     assert request["messages"][-1]["content"] == "Keep   these spaces"
-    assert event.replies[-1] == "Hi"
+    assert event.replies[-1].startswith("Hi")
 
 
 @pytest.mark.asyncio
@@ -300,7 +302,7 @@ async def test_gpt_requires_configured_rapidapi_key(bot, registry):
 
     await registry.dispatch(bot, event, event.raw_text)
 
-    assert any("RAPIDAPI_KEY" in reply for reply in event.replies)
+    assert any("ai add" in reply or "RAPIDAPI_KEY" in reply for reply in event.replies)
 
 
 def test_extract_answer_supports_text_content_parts():

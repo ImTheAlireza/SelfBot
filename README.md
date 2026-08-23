@@ -144,27 +144,29 @@ which can deadlock when invoked by the process being restarted.
 ### AI
 | Command | Description |
 |---|---|
-| `gpt <prompt>` | Ask an AI model. Reply to a message to feed it as context. Providers fall over automatically on quota errors. |
+| `gpt <prompt>` | Ask the **active** model. Reply to a message to feed it as context. The answer is footed with the provider/model that was used. |
+| `model [list\|<model>\|current]` | 👑 Show or set the active model (e.g. `model luna` or `model bluesminds/luna`) |
+| `ai [status\|add\|default\|enable\|disable\|remove\|test\|model]` | 👑 One command for all provider & model management |
 | `gptedit [instruction]` | 👑 Rewrite one of **your own** messages with AI, editing it in place |
 | `gptmemory on\|off\|clear\|turns\|status` | Per-chat conversation memory |
 | `summarize [n] [--lang en\|fa] [--brief\|--detailed]` | Summarize a replied message, document or last `n` messages |
-| `gptmodel list\|set\|clear\|current` | 👑 Discover and choose models |
-| `aistatus [test <name>]` | 👑 Provider health, cooldowns and live connectivity test |
-| `provider add\|list\|default\|enable\|disable\|remove\|test` | 👑 Manage OpenAI-compatible providers stored in the database |
 
-AI providers and API keys are stored **in the database** (encrypted at rest),
-not in `.env`. To add one:
+The active model is simply **the default provider's model** — no confusing
+global override. To add and use a provider:
 
 ```
-provider add openai https://api.openai.com/v1 sk-your-key gpt-4o-mini
-gptmodel set openai/gpt-4o-mini
+ai add bluesminds https://api.bluesminds.com/v1 sk-your-key luna
+ai default bluesminds
+model          # → "luna via bluesminds"
 ```
 
-Keys still present in `ANYAPI_KEY` / `BLUESMINDS_API_KEY` / `RAPIDAPI_KEY` are
-seeded into the database automatically on first start, so existing
-deployments keep working. When a provider returns a quota/rate-limit error it
-is temporarily skipped with exponential back-off; `aistatus` shows who is
-cooling down.
+Or switch models on the default provider anytime: `model luna`.
+
+Providers and API keys are stored **in the database** (encrypted at rest),
+not in `.env`. Keys still present in `ANYAPI_KEY` / `BLUESMINDS_API_KEY` /
+`RAPIDAPI_KEY` are seeded automatically on first start. When a provider
+returns a quota/rate-limit error it is temporarily skipped with exponential
+back-off; `ai` shows who is cooling down.
 
 ### Messaging
 | Command | Description |

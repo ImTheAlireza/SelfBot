@@ -88,7 +88,7 @@ async def _delete_status(message: Any) -> None:
     examples=("gpt What is the meaning of life?",),
 )
 async def cmd_gpt(ctx: Context) -> None:
-    """Ask an AI model, trying each configured provider until one answers."""
+    """Ask the active AI model. Shows which provider/model answered."""
     prompt = ctx.raw_args.strip()
     if not prompt:
         raise UsageError(f"Usage: `{ctx.config.command_prefix}gpt <prompt>`")
@@ -98,8 +98,7 @@ async def cmd_gpt(ctx: Context) -> None:
     if not providers:
         raise FeatureDisabledError(
             "No AI provider is configured. Add one with "
-            "`provider add <name> <base_url> <api_key> [model]`, or set "
-            "ANYAPI_KEY / BLUESMINDS_API_KEY / RAPIDAPI_KEY in your `.env`."
+            "`ai add <name> <base_url> <api_key> [model]`."
         )
 
     # Reply-to context: when the command is a reply, feed the quoted message
@@ -121,10 +120,16 @@ async def cmd_gpt(ctx: Context) -> None:
         answer = await manager.chat(
             prompt, chat_id=ctx.chat_id, history=memory_on
         )
+        used_provider = getattr(manager, "_last_provider", "") or ""
+        used_model = getattr(manager, "_last_model", "") or ""
     finally:
         await _delete_status(status)
 
-    await ctx.reply(answer)
+    footer = ""
+    if used_provider:
+        shown_model = used_model or "(default)"
+        footer = f"\n\n_— via {used_provider} · `{shown_model}`_"
+    await ctx.reply(answer + footer)
 
 
 async def _memory_enabled(ctx: Context, manager: AIManager) -> bool:
@@ -399,73 +404,277 @@ def _extract_document_text(path: Path) -> str:
 
 
 # --------------------------------------------------------------------------
-# aistatus
+# ai — one command for everything provider/model related
 # --------------------------------------------------------------------------
 
 
-@command("aistatus", category=CATEGORY, sudo_only=True, usage="aistatus [test <name>]")
-async def cmd_aistatus(ctx: Context) -> None:
-    """Show configured AI providers, their health and any active cooldown."""
+@command(
+    "ai",
+    category=CATEGORY,
+    sudo_only=True,
+    usage=(
+        "ai [status|list|add|remove|default|enable|disable|test|model] ..."
+    ),
+    examples=(
+        "ai",
+        "ai status",
+        "ai add openai https://api.openai.com/v1 sk-xxx gpt-4o-mini",
+        "ai default bluesminds",
+        "ai model luna",
+        "ai model list",
+    ),
+)
+async def cmd_ai(ctx: Context) -> None:
+    """Manage AI providers and the active model in one place."""
     manager = get_manager(ctx)
+    action = (ctx.args[0].lower() if ctx.args else "status")
+    args = ctx.args[1:]
 
-    if ctx.args and ctx.args[0].lower() == "test":
-        if len(ctx.args) < 2:
-            raise UsageError("Usage: `aistatus test <provider>`")
-        name = ctx.args[1]
-        await ctx.reply(f"🔌 Testing `{name}`…")
-        ok, detail = await manager.test_provider(name)
-        icon = "✅" if ok else "❌"
-        await ctx.reply(f"{icon} **{name}** — {detail}")
-        return
+    if action in {"status", "list", "ls", ""}:
+        await _ai_status(ctx, manager, verbose=(action in {"list", "ls"}))
+    elif action == "add":
+        await _ai_add(ctx, manager, args)
+    elif action == "remove":
+        if not args:
+            raise UsageError("Usage: `ai remove <name>`")
+        if await manager.remove_provider(args[0]):
+            await ctx.reply(f"✅ Removed provider `{args[0]}`.")
+        else:
+            await ctx.reply(f"ℹ️ No provider named `{args[0]}`.")
+    elif action == "default":
+        if not args:
+            raise UsageError("Usage: `ai default <name>`")
+        try:
+            await manager.set_default(args[0])
+        except KeyError:
+            raise ValidationError(f"No provider named `{args[0]}`.") from None
+        model, provider = await manager.current_model()
+        await ctx.reply(
+            f"✅ **{args[0]}** is now the default.\n"
+            f"🧠 Active model: `{model}` via `{provider}`."
+        )
+    elif action in {"enable", "disable"}:
+        await _ai_toggle(ctx, manager, args, enabled=(action == "enable"))
+    elif action == "test":
+        if not args:
+            raise UsageError("Usage: `ai test <name>`")
+        await ctx.reply(f"🔌 Testing `{args[0]}`…")
+        ok, detail = await manager.test_provider(args[0])
+        await ctx.reply(f"{'✅' if ok else '❌'} **{args[0]}** — {detail}")
+    elif action == "model":
+        await _ai_model(ctx, manager, args)
+    else:
+        raise ValidationError(
+            f"Unknown action `{action}`. Try: status, add, remove, default, "
+            "enable, disable, test, model."
+        )
 
+
+# Aliases for the old separate commands, kept for muscle memory.
+@command("aistatus", category=CATEGORY, sudo_only=True, usage="aistatus", hidden=True)
+async def cmd_aistatus_alias(ctx: Context) -> None:
+    """Deprecated alias for `ai status`."""
+    ctx.args = ["status"]
+    await cmd_ai(ctx)
+
+
+@command(
+    "provider",
+    category=CATEGORY,
+    sudo_only=True,
+    usage="provider <add|list|default|...>",
+    hidden=True,
+)
+async def cmd_provider_alias(ctx: Context) -> None:
+    """Deprecated alias for `ai`."""
+    await cmd_ai(ctx)
+
+
+async def _ai_status(ctx: Context, manager: AIManager, *, verbose: bool) -> None:
     statuses = await manager.status()
     if not statuses:
-        await ctx.reply("ℹ️ No AI providers configured. Use `provider add` to add one.")
+        prefix = ctx.config.command_prefix
+        await ctx.reply(
+            "🧠 **No AI providers configured.**\n\n"
+            f"Add one:\n`{prefix}ai add <name> <base_url> <api_key> [model]`\n\n"
+            "Example:\n`ai add openai https://api.openai.com/v1 sk-xxx gpt-4o-mini`"
+        )
         return
 
-    default_name = None
-    for s in statuses:
-        if s.provider.is_default:
-            default_name = s.provider.name
-
-    lines = ["🧠 **AI providers**\n"]
+    model, default_name = await manager.current_model()
     available = sum(1 for s in statuses if s.available)
-    lines.append(
-        f"{available}/{len(statuses)} available"
-        + (f" · default: `{default_name}`" if default_name else "")
-        + "\n"
-    )
+    lines = [
+        "🧠 **AI status**\n",
+        f"Active: `{model}` via **{default_name}** "
+        f"· {available}/{len(statuses)} up\n",
+    ]
     for s in statuses:
         p = s.provider
         if not p.enabled:
             icon = "⏸"
         elif s.cooldown_remaining:
             icon = "❄️"
-        elif p.last_error and not p.is_default:
+        elif p.last_error:
             icon = "⚠️"
         else:
             icon = "✅"
-        title = f"{icon} **{p.name}**"
-        if p.is_default:
-            title += " _(default)_"
-        lines.append(title)
-        model = p.model or "(provider default)"
-        lines.append(f"  `{p.base_url}`")
-        lines.append(
-            f"  model: `{model}` · key: `{p.redacted_key}` · "
-            f"{p.success_count} ok / {p.failure_count} fail"
-        )
+        default_marker = " ◂ default" if p.is_default else ""
+        lines.append(f"{icon} **{p.name}**{default_marker}")
+        if verbose:
+            lines.append(f"  `{p.base_url}`")
+        shown_model = p.model or "(provider default)"
+        stats = f"  model: `{shown_model}`"
+        if verbose:
+            stats += f" · key: `{p.redacted_key}` · {p.success_count}ok/{p.failure_count}fail"
+        lines.append(stats)
         if s.cooldown_remaining:
-            lines.append(f"  ❄️ cooldown: {s.cooldown_remaining}s")
-        if p.last_error:
+            lines.append(f"  ❄️ cooldown {s.cooldown_remaining}s")
+        if p.last_error and verbose:
             lines.append(f"  ⚠️ {truncate(p.last_error, 120)}")
-        lines.append("")
+    prefix = ctx.config.command_prefix
+    lines.append(
+        f"\n`{prefix}ai model <name>` switch · `{prefix}ai model list` browse · "
+        f"`{prefix}ai add ...` add"
+    )
+    await ctx.reply("\n".join(lines))
 
-    await ctx.reply("\n".join(lines).rstrip())
+
+async def _ai_model(ctx: Context, manager: AIManager, args: list[str]) -> None:
+    """`ai model` — show/set/list the active model."""
+    sub = args[0].lower() if args else ""
+
+    if sub in {"", "current"}:
+        model, provider = await manager.current_model()
+        await ctx.reply(f"🧠 Active model: `{model}` via **{provider}**.")
+        return
+
+    if sub == "list":
+        status = await ctx.reply("🔍 Discovering models…")
+        models = await manager.list_models()
+        await _delete_status(status)
+        if not models:
+            await ctx.reply(
+                "ℹ️ Couldn't discover models. You can still set one directly, "
+                "e.g. `ai model gpt-4o-mini`."
+            )
+            return
+        current, _ = await manager.current_model()
+        lines = [f"🧠 **Models** ({len(models)}) — active: `{current}`\n"]
+        for entry in models[:60]:
+            marker = " ◂ active" if entry["current"] else ""
+            providers = ", ".join(entry["providers"])
+            lines.append(f"• `{entry['id']}` _({providers})_{marker}")
+        if len(models) > 60:
+            lines.append(f"\n_…and {len(models) - 60} more_")
+        lines.append("\nSet it with `ai model <id>` or `ai model <provider>/<id>`.")
+        await ctx.reply("\n".join(lines))
+        return
+
+    # Everything else is treated as the model to set.
+    raw = " ".join(args).strip()
+    if "/" in raw:
+        # provider/model form
+        provider_name, _, model_name = raw.partition("/")
+        provider_name = provider_name.strip().lower()
+        model_name = model_name.strip()
+        if not await ctx.db.get_provider(provider_name):
+            raise ValidationError(f"No provider named `{provider_name}`.")
+        await manager.set_provider_model(provider_name, model_name)
+        set_provider = provider_name
+        set_model = model_name
+    else:
+        try:
+            set_model, set_provider = await manager.set_active_model(raw)
+        except KeyError as exc:
+            raise ValidationError(f"No provider named `{exc.args[0]}`.") from None
+
+    await ctx.reply(
+        f"✅ Active model set to `{set_model}` via **{set_provider}**.\n"
+        "The next `gpt` call will use it."
+    )
+
+
+async def _ai_add(ctx: Context, manager: AIManager, args: list[str]) -> None:
+    if len(args) < 3:
+        raise UsageError(
+            "Usage: `ai add <name> <base_url> <api_key> [model]`"
+        )
+    name = args[0].lower()
+    base_url = args[1]
+    api_key = args[2]
+    model = " ".join(args[3:]).strip()
+
+    if not name.replace("_", "").replace("-", "").isalnum():
+        raise ValidationError("Provider name may only contain letters, numbers, '-' and '_'.")
+    if not (base_url.startswith("http://") or base_url.startswith("https://")):
+        raise ValidationError("Base URL must start with http:// or https://")
+    if len(api_key) < 4:
+        raise ValidationError("That API key looks too short.")
+
+    existing = await ctx.db.get_provider(name)
+    make_default = existing is None and await ctx.db.count_providers() == 0
+
+    if existing is not None:
+        await ctx.db.update_provider(
+            name, base_url=base_url, api_key=api_key,
+            model=model or existing.model,
+        )
+        manager.invalidate()
+        await ctx.reply(f"✅ Updated provider `{name}`.")
+        return
+
+    await manager.add_openai_provider(
+        name, base_url, api_key, model=model, is_default=make_default
+    )
+    suffix = " (set as default)" if make_default else ""
+    await ctx.reply(
+        f"✅ Added provider `{name}`{suffix}.\n"
+        f"Set its model with `ai model {name}/<model>` or `ai model <model>` "
+        "to use it on the default provider."
+    )
+
+
+async def _ai_toggle(
+    ctx: Context, manager: AIManager, args: list[str], *, enabled: bool
+) -> None:
+    if not args:
+        state = "enable" if enabled else "disable"
+        raise UsageError(f"Usage: `ai {state} <name>`")
+    name = args[0]
+    if not await ctx.db.get_provider(name):
+        raise ValidationError(f"No provider named `{name}`.")
+    await ctx.db.update_provider(name, enabled=enabled)
+    manager.invalidate()
+    verb = "enabled" if enabled else "disabled"
+    await ctx.reply(f"✅ {verb.capitalize()} `{name}`.")
 
 
 # --------------------------------------------------------------------------
-# gptmodel
+# model (short alias for `ai model`)
+# --------------------------------------------------------------------------
+
+
+@command(
+    "model",
+    category=CATEGORY,
+    sudo_only=True,
+    usage="model [list|<model>|current]",
+    examples=("model", "model list", "model luna", "model bluesminds/luna"),
+)
+async def cmd_model(ctx: Context) -> None:
+    """Show or set the active AI model (shortcut for `ai model`)."""
+    manager = get_manager(ctx)
+    if not ctx.args:
+        m, provider = await manager.current_model()
+        await ctx.reply(f"🧠 Active model: `{m}` via **{provider}**.")
+        return
+    # Route through the ai model handler, but strip "model" from args.
+    ctx.args = ["model", *ctx.args]
+    await cmd_ai(ctx)
+
+
+# --------------------------------------------------------------------------
+# gptmodel — deprecated alias kept for backward compatibility
 # --------------------------------------------------------------------------
 
 
@@ -473,158 +682,36 @@ async def cmd_aistatus(ctx: Context) -> None:
     "gptmodel",
     category=CATEGORY,
     sudo_only=True,
-    usage="gptmodel <list|set|clear|current> [model]",
-    examples=("gptmodel list", "gptmodel set openai/gpt-4o-mini", "gptmodel current"),
+    usage="gptmodel [list|set|current]",
+    hidden=True,
 )
-async def cmd_gptmodel(ctx: Context) -> None:
-    """List available models or choose the default model used by ``gpt``."""
-    if not ctx.args:
-        raise UsageError(
-            "Usage: `gptmodel <list|set|clear|current> [model]`\n"
-            "• `list` — discover models from enabled providers\n"
-            "• `set <model>` — set the global default model\n"
-            "• `set <provider> <model>` — set one provider's model\n"
-            "• `clear` — remove the global override\n"
-            "• `current` — show what the next `gpt` call uses"
-        )
-
+async def cmd_gptmodel_alias(ctx: Context) -> None:
+    """Deprecated: use `model` or `ai model`."""
     manager = get_manager(ctx)
-    action = ctx.args[0].lower()
-
-    if action == "list":
-        status = await ctx.reply("🔍 Discovering models…")
-        models = await manager.list_models()
-        await _delete_status(status)
-        if not models:
-            await ctx.reply(
-                "ℹ️ No models discovered. Check `aistatus`; providers may be "
-                "unreachable or you can set a model directly with "
-                "`gptmodel set <model>`."
-            )
-            return
-        current = await manager.current_model()
-        lines = [f"🧠 **Models** ({len(models)}) — current: `{current}`\n"]
-        for entry in models[:60]:
-            marker = " ◂ current" if entry["current"] else ""
-            providers = ", ".join(entry["providers"])
-            lines.append(f"• `{entry['id']}` _({providers})_{marker}")
-        if len(models) > 60:
-            lines.append(f"\n_…and {len(models) - 60} more_")
-        await ctx.reply("\n".join(lines))
-
-    elif action == "set":
-        if len(ctx.args) < 2:
-            raise UsageError("Usage: `gptmodel set <model>` or `gptmodel set <provider> <model>`")
-
-        # Two-argument form: gptmodel set <provider> <model>
-        if len(ctx.args) >= 3 and "/" not in ctx.args[1]:
-            provider_name = ctx.args[1]
-            model = " ".join(ctx.args[2:]).strip()
-            existing = await ctx.db.get_provider(provider_name)
-            if existing is None:
-                raise ValidationError(f"No provider named `{provider_name}`.")
-            await manager.set_provider_model(provider_name, model)
-            await ctx.reply(f"✅ Set `{provider_name}` model to `{model}`.")
-            return
-
-        model = " ".join(ctx.args[1:]).strip()
-        if len(model) > 200:
-            raise ValidationError("Model name is too long.")
-        await manager.set_global_model(model)
-        await ctx.reply(f"✅ Default model set to `{model}`.")
-
-    elif action == "clear":
-        await manager.clear_global_model()
-        await ctx.reply("✅ Cleared the global model override.")
-
-    elif action == "current":
-        current = await manager.current_model()
-        default = await ctx.db.get_default_provider()
-        provider_name = default.name if default else "(config)"
-        await ctx.reply(
-            f"🧠 Next `gpt` call uses `{current}` via **{provider_name}**."
-        )
-
-    else:
-        raise ValidationError(f"Unknown action `{action}`. Try list/set/clear/current.")
-
-
-# --------------------------------------------------------------------------
-# provider
-# --------------------------------------------------------------------------
-
-
-@command(
-    "provider",
-    category=CATEGORY,
-    sudo_only=True,
-    usage=(
-        "provider <add|remove|list|default|enable|disable|test> "
-        "[name] [base_url] [api_key] [model]"
-    ),
-    examples=(
-        "provider add openai https://api.openai.com/v1 sk-xxx gpt-4o-mini",
-        "provider list",
-        "provider default openai",
-        "provider test openai",
-    ),
-)
-async def cmd_provider(ctx: Context) -> None:
-    """Add, list and manage AI providers stored in the database."""
     if not ctx.args:
-        prefix = ctx.config.command_prefix
+        m, provider = await manager.current_model()
         await ctx.reply(
-            "🧠 **AI providers**\n\n"
-            f"`{prefix}provider add <name> <base_url> <api_key> [model]`\n"
-            f"`{prefix}provider list`\n"
-            f"`{prefix}provider default <name>`\n"
-            f"`{prefix}provider enable|disable <name>`\n"
-            f"`{prefix}provider test <name>`\n"
-            f"`{prefix}provider remove <name>`"
+            f"🧠 Active model: `{m}` via **{provider}**.\n"
+            "_(This command is now `model`.)_"
         )
         return
-
-    manager = get_manager(ctx)
-    action = ctx.args[0].lower()
-
-    if action == "add":
-        await _provider_add(ctx, manager)
-    elif action in {"list", "ls"}:
-        await _provider_list(ctx, manager)
-    elif action == "remove":
-        if len(ctx.args) < 2:
-            raise UsageError("Usage: `provider remove <name>`")
-        name = ctx.args[1]
-        if await manager.remove_provider(name):
-            await ctx.reply(f"✅ Removed provider `{name}`.")
-        else:
-            await ctx.reply(f"ℹ️ No provider named `{name}`.")
-    elif action == "default":
-        if len(ctx.args) < 2:
-            raise UsageError("Usage: `provider default <name>`")
-        name = ctx.args[1]
-        try:
-            await manager.set_default(name)
-        except KeyError:
-            raise ValidationError(f"No provider named `{name}`.") from None
-        await ctx.reply(f"✅ `{name}` is now the default provider.")
-    elif action == "enable":
-        await _provider_toggle(ctx, manager, True)
-    elif action == "disable":
-        await _provider_toggle(ctx, manager, False)
-    elif action == "test":
-        if len(ctx.args) < 2:
-            raise UsageError("Usage: `provider test <name>`")
-        name = ctx.args[1]
-        await ctx.reply(f"🔌 Testing `{name}`…")
-        ok, detail = await manager.test_provider(name)
-        icon = "✅" if ok else "❌"
-        await ctx.reply(f"{icon} **{name}** — {detail}")
-    else:
-        raise ValidationError(
-            f"Unknown action `{action}`. "
-            "Try add/list/default/enable/disable/test/remove."
+    sub = ctx.args[0].lower()
+    if sub == "list":
+        ctx.args = ["model", "list"]
+        await cmd_ai(ctx)
+    elif sub == "current":
+        m, provider = await manager.current_model()
+        await ctx.reply(f"🧠 Active model: `{m}` via **{provider}**.")
+    elif sub == "set":
+        ctx.args = ["model", *ctx.args[1:]]
+        await cmd_ai(ctx)
+    elif sub == "clear":
+        await ctx.reply(
+            "ℹ️ There's no global override anymore — just set the model you "
+            "want with `model <name>`."
         )
+    else:
+        raise ValidationError("Try `model list`, `model <name>`, or `model current`.")
 
 
 async def _provider_add(ctx: Context, manager: AIManager) -> None:

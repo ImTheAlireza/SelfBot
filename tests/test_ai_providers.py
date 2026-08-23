@@ -151,16 +151,38 @@ async def test_config_fallback_when_db_empty(db) -> None:
     assert http.calls[0]["json"]["model"] == "env-model"
 
 
-async def test_global_model_override(db) -> None:
+async def test_set_active_model_updates_default_provider(db) -> None:
     await db.add_provider(
         "a", "https://a/v1", "ka", model="default-model", is_default=True
     )
-    await db.set_setting("ai.default_model", "override-model")
     http = _Http(default=_Resp({"choices": [{"message": {"content": "ok"}}]}))
     manager = AIManager(_ManagerBot(db, _ai_config(), http))
 
+    model, provider = await manager.set_active_model("luna")
+    assert model == "luna" and provider == "a"
+
     await manager.chat("q", history=False)
-    assert http.calls[0]["json"]["model"] == "override-model"
+    assert http.calls[0]["json"]["model"] == "luna"
+
+    current_model, current_provider = await manager.current_model()
+    assert current_model == "luna"
+    assert current_provider == "a"
+
+
+async def test_set_active_model_targets_specific_provider(db) -> None:
+    await db.add_provider(
+        "a", "https://a/v1", "ka", model="ma", is_default=True
+    )
+    await db.add_provider("b", "https://b/v1", "kb", model="mb")
+    manager = AIManager(_ManagerBot(db, _ai_config(), _Http()))
+
+    _model, provider = await manager.set_active_model("b/luna")
+    assert provider == "b"
+    b = await db.get_provider("b")
+    assert b is not None and b.model == "luna"
+    # Default provider's model untouched.
+    a = await db.get_provider("a")
+    assert a is not None and a.model == "ma"
 
 
 async def test_memory_is_persisted_and_pruned(db) -> None:
@@ -258,19 +280,33 @@ async def test_gpt_no_providers_reports_setup(bot: FakeBot) -> None:
     registry: CommandRegistry = bot.registry
     handled = await registry.dispatch(bot, event, event.raw_text)
     assert handled is True
-    assert any("provider add" in r or "ANYAPI_KEY" in r for r in event.replies)
+    assert any("ai add" in r or "ANYAPI_KEY" in r for r in event.replies)
 
 
-async def test_gptmodel_current_uses_config_when_empty(bot: FakeBot) -> None:
-    event = FakeEvent(raw_text="gptmodel current")
+async def test_model_command_shows_active(bot: FakeBot) -> None:
+    event = FakeEvent(raw_text="model")
     await bot.registry.dispatch(bot, event, event.raw_text)
     assert any(ANYAPI_DEFAULT_MODEL in r for r in event.replies)
 
 
-async def test_aistatus_lists_config_provider(bot: FakeBot) -> None:
-    event = FakeEvent(raw_text="aistatus")
-    await bot.registry.dispatch(bot, event, event.raw_text)
+async def test_ai_status_lists_config_provider(bot: FakeBot) -> None:
+    event = FakeEvent(raw_text="ai")
+    await bot.registry.dispatch(bot, event, "ai")
     assert any("rapidapi" in r.lower() for r in event.replies)
+
+
+async def test_ai_set_model_via_model_command(bot: FakeBot) -> None:
+    # The test config has a rapidapi (non-openai) provider, so add an openai one.
+    await bot.db.add_provider(
+        "bluesminds", "https://api.bluesminds.com/v1", "sk-bm",
+        model="old-model", is_default=True, kind="openai",
+    )
+    bot.ai = None  # force manager to reload cache
+    event = FakeEvent(raw_text="model luna")
+    await bot.registry.dispatch(bot, event, "model luna")
+    assert any("luna" in r for r in event.replies)
+    p = await bot.db.get_provider("bluesminds")
+    assert p is not None and p.model == "luna"
 
 
 class ContextStub:
@@ -280,13 +316,35 @@ class ContextStub:
         self.bot = bot
 
 
-async def test_provider_requires_args(bot: FakeBot) -> None:
+async def test_provider_alias_still_works(bot: FakeBot) -> None:
     event = FakeEvent(raw_text="provider")
     await bot.registry.dispatch(bot, event, event.raw_text)
-    assert event.replies, "expected help output"
+    # provider is now an alias for `ai` — shows status.
+    assert event.replies
 
 
-async def test_provider_add_validates_url(bot: FakeBot) -> None:
-    event = FakeEvent(raw_text="provider add bad example.com kxxx model")
+async def test_ai_add_validates_url(bot: FakeBot) -> None:
+    event = FakeEvent(raw_text="ai add bad example.com kxxx model")
     await bot.registry.dispatch(bot, event, event.raw_text)
     assert any("http://" in r or "https://" in r for r in event.replies)
+
+
+async def test_gpt_reply_footer_shows_provider_and_model(bot: FakeBot) -> None:
+    from selfbot.plugins.ai import get_manager
+
+    await bot.db.add_provider(
+        "bluesminds", "https://api.bluesminds.com/v1", "sk-bm",
+        model="gpt-luna", is_default=True, kind="openai",
+    )
+    bot.ai = None
+    manager = get_manager(ContextStub(bot))
+    bot.ai = manager
+
+    class _H:
+        async def request(self, *a, **k):
+            return _Resp({"choices": [{"message": {"content": "answer"}}]})
+
+    bot.http = _H()
+    event = FakeEvent(raw_text="gpt hi")
+    await bot.registry.dispatch(bot, event, "gpt hi")
+    assert any("via bluesminds" in r and "gpt-luna" in r for r in event.replies)
