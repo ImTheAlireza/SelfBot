@@ -29,6 +29,7 @@ BACKUP_SECTIONS = (
     "app_settings",
     "plugin_state",
     "ai_providers",
+    "search_history",
 )
 
 

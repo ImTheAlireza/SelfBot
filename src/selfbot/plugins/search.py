@@ -1,412 +1,426 @@
-"""Search the current chat — or the whole account with --global."""
+"""Search the current chat — or the whole account — with paged results.
+
+Commands
+--------
+* ``search <text> [filters]`` run a search and show page 1
+* ``search more`` / ``search next``  — next page of the last search
+* ``search back`` / ``search prev``  — previous page
+* ``search page <n>``                — jump to a page
+* ``search open <n>``                — show the deep link for result n
+* ``search recent``                  — list recent searches
+* ``search stop``                    — cancel an in-progress global scan
+* ``search save <n>`` / ``search saved`` — name/bookmark a recent search
+
+Filters: ``--from <id|@username|me>``, ``--since/--until <date|1d>``,
+``--type <media>``, ``--chat <name>``, ``--global``, ``--limit N``,
+``--order newest|oldest|relevant``.
+"""
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ..errors import UsageError, ValidationError
 from ..registry import Context, command
+from ..services.search import (
+    MAX_PAGES,
+    MEDIA_ATTRS,
+    PAGE_SIZE,
+    Result,
+    SearchQuery,
+    SearchRun,
+    collect_results,
+    host_to_name,
+    message_link,
+    parse_date,
+    render_empty,
+    render_error,
+    render_page,
+)
 from ..utils.text import truncate
 
 logger = logging.getLogger(__name__)
 
 CATEGORY = "Messaging"
 
-#: Maps the user-facing type name to the Telethon message attribute.
-MEDIA_TYPES: dict[str, str] = {
-    "photo": "photo",
-    "photos": "photo",
-    "video": "video",
-    "videos": "video",
-    "voice": "voice",
-    "voices": "voice",
-    "videomsg": "video_note",
-    "videomsgs": "video_note",
-    "music": "audio",
-    "musics": "audio",
-    "audio": "audio",
-    "file": "document",
-    "files": "document",
-    "sticker": "sticker",
-    "stickers": "sticker",
-    "gif": "gif",
-    "gifs": "gif",
-    "link": "web_preview",
-    "links": "web_preview",
-}
-
-_DATE_FORMATS = ("%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y", "%d/%m/%Y")
+#: Per-user active runs (for pagination/cancellation).
+_active: dict[int, SearchRun] = {}
+#: Per-user current page number.
+_pages: dict[int, int] = {}
+#: Per-user progress status message.
+_progress: dict[int, Any] = {}
+#: The currently-running global search task, per user.
+_tasks: dict[int, asyncio.Task] = {}
 
 
-def _parse_date(value: str, *, end: bool = False) -> datetime:
-    for fmt in _DATE_FORMATS:
-        try:
-            dt = datetime.strptime(value, fmt)
-            if end:
-                dt = dt + timedelta(days=1) - timedelta(microseconds=1)
-            return dt.replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
-    raise ValidationError(
-        f"Could not read date `{value}`. Use YYYY-MM-DD (e.g. 2026-08-22)."
+# --------------------------------------------------------------------------
+# Argument parsing
+# --------------------------------------------------------------------------
+
+_VALUE_FLAGS = {"--from", "--since", "--until", "--type", "--chat", "--limit", "--order"}
+_BOOL_FLAGS = {"--global", "--ungrouped", "--regex", "--exact"}
+
+
+def _parse_args(args: list[str]) -> tuple[list[str], dict[str, str], set[str]]:
+    tokens: list[str] = []
+    values: dict[str, str] = {}
+    booleans: set[str] = set()
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token in _VALUE_FLAGS:
+            if index + 1 >= len(args):
+                raise UsageError(f"`{token}` needs a value.")
+            values[token[2:]] = args[index + 1]
+            index += 2
+        elif token in _BOOL_FLAGS:
+            booleans.add(token[2:])
+            index += 1
+        else:
+            tokens.append(token)
+            index += 1
+    return tokens, values, booleans
+
+
+def _build_query(args: list[str]) -> SearchQuery:
+    tokens, values, booleans = _parse_args(args)
+    text = " ".join(tokens).strip()
+
+    try:
+        page_size = min(int(values.get("limit", str(PAGE_SIZE))), 25)
+    except ValueError as exc:
+        raise ValidationError("`--limit` must be a number.") from exc
+    if page_size < 1:
+        raise ValidationError("`--limit` must be at least 1.")
+
+    media = values.get("type")
+    if media and media not in MEDIA_ATTRS:
+        supported = ", ".join(sorted(set(MEDIA_ATTRS)))
+        raise ValidationError(f"Unknown media type `{media}`. Supported: {supported}")
+    media_attr = MEDIA_ATTRS.get(media or "", media)
+
+    sender: str | None = None
+    if "from" in values:
+        raw = values["from"].lstrip("@")
+        sender = "me" if raw.lower() == "me" else raw
+
+    since = parse_date(values["since"]) if "since" in values else None
+    until = parse_date(values["until"], end=True) if "until" in values else None
+    order = values.get("order", "newest").lower()
+    if order not in {"newest", "oldest", "relevant"}:
+        raise ValidationError("`--order` must be newest, oldest or relevant.")
+
+    return SearchQuery(
+        text=text,
+        sender=sender,
+        since=since,
+        until=until,
+        media=media_attr,
+        global_search="global" in booleans,
+        chat=values.get("chat"),
+        chat_id=0,  # filled in by the command (it knows the current chat)
+        order=order,
+        page_size=page_size,
     )
+
+
+# --------------------------------------------------------------------------
+# Command
+# --------------------------------------------------------------------------
 
 
 @command(
     "search",
     category=CATEGORY,
     usage=(
-        "search <text> [--from <id|@username|me>] [--since YYYY-MM-DD] "
-        "[--until YYYY-MM-DD] [--type <media>] [--limit N] [--global]"
+        "search <text> [--from X] [--since D] [--until D] [--type media] "
+        "[--chat name] [--global] [--limit N] [--order newest|oldest|relevant]\n"
+        "search more|back|page <n>|open <n>|recent|stop|saved"
     ),
     examples=(
         "search invoice",
         "search --from @durov --since 2026-01-01",
-        "search contract --global --limit 30",
-        "search --type photos --global",
+        "search contract --global --chat work --limit 15",
+        "search more",
+        "search open 3",
     ),
 )
 async def cmd_search(ctx: Context) -> None:
-    """Search chat history by text, sender, date or media type.
+    """Search messages, with paged results and account-wide ``--global``."""
+    sub = ctx.args[0].lower() if ctx.args else ""
 
-    Without ``--global`` only the current chat is searched. ``--global``
-    searches every private chat, group and channel in the account.
-    """
-    tokens, flags = _parse_args(ctx.args)
+    # Pagination / control subcommands take no extra parsing.
+    if sub in {"more", "next"}:
+        return await _show_page(ctx, (_pages.get(ctx.sender_id, 1)) + 1)
+    if sub in {"back", "prev", "previous"}:
+        return await _show_page(ctx, max(1, (_pages.get(ctx.sender_id, 1)) - 1))
+    if sub == "page":
+        if len(ctx.args) < 2 or not ctx.args[1].isdigit():
+            raise UsageError("Usage: `search page <n>`")
+        return await _show_page(ctx, int(ctx.args[1]))
+    if sub == "open":
+        return await _open_result(ctx)
+    if sub == "stop":
+        return await _stop_search(ctx)
+    if sub == "recent":
+        return await _recent_searches(ctx)
+    if sub == "saved":
+        return await _saved_searches(ctx)
+    if sub == "save":
+        return await _save_search(ctx)
 
-    text = " ".join(tokens).strip()
-    sender = flags.get("from")
-    since = flags.get("since")
-    until = flags.get("until")
-    media = flags.get("type")
-    global_search = "--global" in ctx.args
-    try:
-        limit = min(int(flags.get("limit", "20")), 100)
-    except ValueError as exc:
-        raise ValidationError("`--limit` must be a number.") from exc
-    if limit < 1:
-        raise ValidationError("`--limit` must be at least 1.")
-
-    if global_search and not (text or media or sender):
+    # Otherwise it's a fresh search.
+    query = _build_query(ctx.args)
+    if query.global_search and not (query.text or query.media or query.sender):
         raise UsageError(
             "`--global` needs a search term, `--type media`, or `--from <who>`."
         )
-
-    if not (text or sender or since or until or media):
+    if not (query.text or query.sender or query.since or query.until or query.media):
         raise UsageError(
             "Tell me what to look for.\n"
             "Usage: `search <text> [--from X] [--since D] [--until D] "
-            "[--type media] [--limit N] [--global]`"
+            "[--type media] [--global] [--limit N]`"
         )
 
-    if media and media not in MEDIA_TYPES:
-        supported = ", ".join(sorted(set(MEDIA_TYPES)))
-        raise ValidationError(f"Unknown media type `{media}`. Supported: {supported}")
-
-    from_user: Any = None
-    if sender:
-        sender = sender.lstrip("@")
-        if sender.lower() == "me":
-            from_user = "me"
-        elif sender.lstrip("-").isdigit():
-            from_user = int(sender)
-        else:
-            from_user = sender
-
-    since_dt = _parse_date(since) if since else None
-    until_dt = _parse_date(until, end=True) if until else None
+    query.chat_id = ctx.chat_id
+    run = SearchRun(query=query)
+    _active[ctx.sender_id] = run
+    _pages[ctx.sender_id] = 1
 
     status = await ctx.reply(
-        "🌍 Searching across all chats…" if global_search else "🔍 Searching…"
+        "🌍 Searching across all chats…" if query.global_search else "🔍 Searching…"
+    )
+    _progress[ctx.sender_id] = status
+
+    if query.global_search:
+        # Run the (potentially slow) global scan as a cancellable task with a
+        # progress heartbeat so it never looks frozen.
+        task = asyncio.create_task(_run_with_progress(ctx, run, status))
+        _tasks[ctx.sender_id] = task
+        try:
+            await task
+        except asyncio.CancelledError:
+            run.cancel()
+        finally:
+            _tasks.pop(ctx.sender_id, None)
+    else:
+        try:
+            run.results = await collect_results(ctx.client, query)
+        except Exception as exc:
+            await _safe_delete(status)
+            await ctx.reply(render_error(f"{type(exc).__name__}: {exc}"))
+            return
+
+    _order_results(run)
+    await _persist(ctx, query, run.results)
+    await _safe_delete(status)
+    _progress.pop(ctx.sender_id, None)
+
+    if not run.results:
+        await ctx.reply(render_empty(query))
+        return
+    await _reply_chunked(ctx, render_page(run, 1))
+
+
+# --------------------------------------------------------------------------
+# Pagination / actions
+# --------------------------------------------------------------------------
+
+
+async def _show_page(ctx: Context, number: int) -> None:
+    run = _active.get(ctx.sender_id)
+    if run is None:
+        await ctx.reply("ℹ️ No previous search — run `search <text>` first.")
+        return
+    number = max(1, min(number, run.page_count))
+    _pages[ctx.sender_id] = number
+    await _reply_chunked(ctx, render_page(run, number))
+
+
+async def _open_result(ctx: Context) -> None:
+    if len(ctx.args) < 2 or not ctx.args[1].isdigit():
+        raise UsageError("Usage: `search open <n>`")
+    run = _active.get(ctx.sender_id)
+    if run is None:
+        raise UsageError("No previous search.")
+    index = int(ctx.args[1]) - 1
+    page = _pages.get(ctx.sender_id, 1)
+    offset = (page - 1) * run.query.page_size
+    real_index = offset + index if index < run.query.page_size else index
+    if real_index < 0 or real_index >= len(run.results):
+        raise ValidationError(f"Result {index + 1} isn't on this page.")
+    result = run.results[real_index]
+    link = message_link(result.chat_id, result.message_id)
+    await ctx.reply(
+        f"🔗 **Result {real_index + 1}** · {result.chat_title} · "
+        f"{result.sender_name}\n{link}\n\n{result.snippet}"
     )
 
-    attribute = MEDIA_TYPES.get(media) if media else None
 
-    found: Any
-    try:
-        if global_search:
-            found = await _search_global(
-                ctx,
-                text=text,
-                from_user=from_user,
-                since_dt=since_dt,
-                until_dt=until_dt,
-                attribute=attribute,
-                limit=limit,
-            )
-        else:
-            found = await _search_local(
-                ctx,
-                text=text,
-                from_user=from_user,
-                since_dt=since_dt,
-                until_dt=until_dt,
-                attribute=attribute,
-                limit=limit,
-            )
-    except Exception as exc:
-        await _delete_status(status)
-        await ctx.reply(f"❌ Search failed: `{type(exc).__name__}: {exc}`")
+async def _stop_search(ctx: Context) -> None:
+    task = _tasks.get(ctx.sender_id)
+    run = _active.get(ctx.sender_id)
+    if task is not None and not task.done():
+        task.cancel()
+    if run is not None:
+        run.cancel()
+    status = _progress.get(ctx.sender_id)
+    if status is not None:
+        try:
+            await ctx.bot.edit(status, "⏹ Stopping…")
+        except Exception:
+            pass
+    await ctx.reply("⏹ Search stopped.")
+
+
+async def _recent_searches(ctx: Context) -> None:
+    rows = await ctx.db.list_searches(ctx.sender_id, limit=15)
+    if not rows:
+        await ctx.reply("ℹ️ No recent searches.")
         return
-
-    if not found:
-        await _delete_status(status)
-        await ctx.reply("ℹ️ No messages matched.")
-        return
-
-    if global_search:
-        lines = [f"🌍 **{len(found)} global result(s)**\n"]
-        for message, chat_title, chat_id in found[:limit]:
-            snippet = _snippet(message)
-            sender_name = await _sender_name(message)
-            when = message.date.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
-            link = _message_link(chat_id, message.id)
-            lines.append(
-                f"• **{chat_title}** · {sender_name} · `{when}` · [go]({link})\n  {snippet}"
-            )
-    else:
-        lines = [f"🔍 **{len(found)} result(s)**\n"]
-        for message in found[:limit]:
-            snippet = _snippet(message)
-            sender_name = await _sender_name(message)
-            when = message.date.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
-            link = _message_link(ctx.chat_id, message.id)
-            lines.append(
-                f"• **{sender_name}** · `{when}` · [go]({link})\n  {snippet}"
-            )
-    await status.delete()
+    lines = ["🕘 **Recent searches**\n"]
+    for row in rows:
+        marker = "⭐ " if row["saved"] else ""
+        lines.append(f"`{row['id']:>3}` {marker}{truncate(row['label'], 70)}")
+    lines.append("\nRe-run with `search recent <id>` (coming soon) or type a new `search`.")
     await ctx.reply("\n".join(lines))
 
 
-async def _delete_status(message: Any) -> None:
+async def _saved_searches(ctx: Context) -> None:
+    rows = await ctx.db.list_searches(ctx.sender_id, saved_only=True, limit=30)
+    if not rows:
+        await ctx.reply("ℹ️ No saved searches. Use `search save <n>` after a search.")
+        return
+    lines = ["⭐ **Saved searches**\n"]
+    for row in rows:
+        lines.append(f"`{row['id']:>3}` {truncate(row['label'], 70)}")
+    await ctx.reply("\n".join(lines))
+
+
+async def _save_search(ctx: Context) -> None:
+    if len(ctx.args) < 2 or not ctx.args[1].isdigit():
+        raise UsageError("Usage: `search save <recent-id>`")
+    search_id = int(ctx.args[1])
+    row = await ctx.db.get_search(search_id)
+    if row is None or row["user_id"] != ctx.sender_id:
+        raise ValidationError(f"No saved/recent search #{search_id}.")
+    await ctx.db.set_search_saved(search_id, True)
+    await ctx.reply(f"⭐ Saved search #{search_id}.")
+
+
+# --------------------------------------------------------------------------
+# Execution helpers
+# --------------------------------------------------------------------------
+
+
+async def _run_with_progress(ctx: Context, run: SearchRun, status: Any) -> None:
+    """Heartbeat that edits the status message while a global scan runs."""
+    completed = asyncio.Event()
+
+    async def heartbeat() -> None:
+        while not completed.is_set():
+            await asyncio.sleep(1.5)
+            try:
+                found = len(run.results)
+                if run.chats_scanned:
+                    text = (
+                        f"🌍 Scanning… {run.chats_scanned} chats, "
+                        f"{found} match{'es' if found != 1 else ''}"
+                    )
+                else:
+                    text = f"🌍 Searching… {found} match{'es' if found != 1 else ''}"
+                await ctx.bot.edit(status, text)
+            except Exception:
+                pass
+
+    beat = asyncio.create_task(heartbeat())
+    try:
+        run.results = await collect_results(
+            ctx.client,
+            run.query,
+            progress=lambda n: None,
+        )
+    finally:
+        completed.set()
+        beat.cancel()
+        try:
+            await beat
+        except Exception:
+            pass
+
+
+def _order_results(run: SearchRun) -> None:
+    if run.query.order == "oldest":
+        run.results.sort(key=lambda r: r.date)
+    elif run.query.order == "relevant" and run.query.text:
+        terms = [t.lower() for t in run.query.text.split() if len(t) >= 2]
+        run.results.sort(
+            key=lambda r: -sum(
+                r.snippet.lower().count(t) for t in terms
+            )
+        )
+    else:
+        run.results.sort(key=lambda r: r.date, reverse=True)
+
+
+async def _persist(ctx: Context, query: SearchQuery, results: list[Result]) -> None:
+    if not results:
+        return
+    # Store enough to re-run; the result list itself isn't cached in the DB
+    # (it can be re-fetched), but the label and flags are.
+    payload = json.dumps(
+        {
+            "text": query.text,
+            "sender": query.sender,
+            "since": query.since.isoformat() if query.since else None,
+            "until": query.until.isoformat() if query.until else None,
+            "media": query.media,
+            "global": query.global_search,
+            "chat": query.chat,
+            "order": query.order,
+            "ids": [[r.chat_id, r.message_id] for r in results[: MAX_PAGES * PAGE_SIZE]],
+        }
+    )
+    try:
+        await ctx.db.add_search(ctx.sender_id, query.label, payload)
+        await ctx.db.prune_searches(ctx.sender_id, keep=50)
+    except Exception:
+        logger.debug("Could not persist search history", exc_info=True)
+
+
+async def _reply_chunked(ctx: Context, text: str) -> None:
+    """Split a long page on result boundaries and send each chunk."""
+    from ..utils.text import chunk_text
+
+    chunks = chunk_text(text, limit=3500)
+    for chunk in chunks:
+        await ctx.reply(chunk)
+
+
+async def _safe_delete(message: Any) -> None:
     if message is None:
         return
     try:
         await message.delete()
     except Exception:
-        logger.debug("Could not delete the search status message", exc_info=True)
+        logger.debug("could not delete search status", exc_info=True)
 
 
-async def _search_local(
-    ctx: Context,
-    *,
-    text: str,
-    from_user: Any,
-    since_dt: datetime | None,
-    until_dt: datetime | None,
-    attribute: str | None,
-    limit: int,
-) -> list[Any]:
-    found: list[Any] = []
-    async for message in ctx.client.iter_messages(
-        ctx.chat_id,
-        search=text or None,
-        from_user=from_user,
-        offset_date=until_dt,
-        limit=1000,
-    ):
-        if since_dt and message.date < since_dt:
-            continue
-        if attribute and not getattr(message, attribute, None):
-            continue
-        found.append(message)
-        if len(found) >= limit:
-            break
-    return found
+# Backwards-compatible aliases (the old module exposed these names).
+MEDIA_TYPES = MEDIA_ATTRS
+_parse_date = parse_date
 
 
-async def _search_global(
-    ctx: Context,
-    *,
-    text: str,
-    from_user: Any,
-    since_dt: datetime | None,
-    until_dt: datetime | None,
-    attribute: str | None,
-    limit: int,
-) -> list[tuple[Any, str, int]]:
-    """Search every dialog in the account.
-
-    Telegram's global message search (entity=None) accepts a search string and
-    a from_user filter but not date/media filters, so those are applied
-    client-side. To support --type without text we iterate each dialog.
-    """
-    found: list[tuple[Any, str, int]] = []
-    title_cache: dict[int, str] = {}
-
-    def _matches(message: Any) -> bool:
-        if since_dt and message.date < since_dt:
-            return False
-        if until_dt and message.date > until_dt:
-            return False
-        return not (attribute and not getattr(message, attribute, None))
-
-    if text:
-        async for message in ctx.client.iter_messages(
-            None,
-            search=text,
-            from_user=from_user,
-            limit=max(limit * 5, 100),
-        ):
-            if not _matches(message):
-                continue
-            chat_id = _chat_id_of(message)
-            title = await _chat_title(ctx, chat_id, title_cache)
-            found.append((message, title, chat_id))
-            if len(found) >= limit:
-                break
-    else:
-        scanned = 0
-        async for dialog in ctx.client.iter_dialogs(limit=200):
-            async for message in ctx.client.iter_messages(
-                dialog.id,
-                from_user=from_user,
-                offset_date=until_dt,
-                limit=500,
-            ):
-                if not _matches(message):
-                    continue
-                chat_id = _chat_id_of(message)
-                title = dialog.name or str(chat_id)
-                title_cache[chat_id] = title
-                found.append((message, title, chat_id))
-                if len(found) >= limit:
-                    break
-                scanned += 1
-                if scanned > 2000:
-                    break
-            if len(found) >= limit or scanned > 2000:
-                break
-
-    return found
-
-
-def _chat_id_of(message: Any) -> int:
-    """Resolve the originating chat id across peer types."""
-    peer_id = message.peer_id
-    if hasattr(peer_id, "channel_id"):
-        return int(f"-100{peer_id.channel_id}")
-    if hasattr(peer_id, "chat_id"):
-        return int(f"-{peer_id.chat_id}")
-    if hasattr(peer_id, "user_id"):
-        return int(peer_id.user_id)
-    return 0
-
-
-async def _chat_title(
-    ctx: Context, chat_id: int, cache: dict[int, str]
-) -> str:
-    if chat_id in cache:
-        return cache[chat_id]
-    title = str(chat_id)
-    try:
-        entity = await ctx.client.get_entity(chat_id)
-        title = (
-            getattr(entity, "title", None)
-            or " ".join(
-                filter(
-                    None,
-                    [
-                        getattr(entity, "first_name", "") or "",
-                        getattr(entity, "last_name", "") or "",
-                    ],
-                )
-            ).strip()
-            or getattr(entity, "username", None)
-            or str(chat_id)
-        )
-    except Exception:
-        logger.debug("Could not resolve chat title for %s", chat_id)
-    cache[chat_id] = title
-    return title
-
-
-def _parse_args(args: list[str]) -> tuple[list[str], dict[str, str]]:
-    """Split positional tokens from ``--flag value`` pairs.
-
-    Boolean flags (``--global``) are stripped so they never become part of the
-    search text.
-    """
-    tokens: list[str] = []
-    flags: dict[str, str] = {}
-    known = {"--from", "--since", "--until", "--type", "--limit"}
-    booleans = {"--global"}
-    index = 0
-    while index < len(args):
-        token = args[index]
-        if token in known:
-            if index + 1 >= len(args):
-                raise UsageError(f"`{token}` needs a value.")
-            flags[token[2:]] = args[index + 1]
-            index += 2
-        elif token in booleans:
-            index += 1
-        else:
-            tokens.append(token)
-            index += 1
-    return tokens, flags
-
-
-def _snippet(message: Any) -> str:
-    if message.media and not (getattr(message, "raw_text", "") or "").strip():
-        media = _describe_media(message)
-        caption = (getattr(message, "raw_text", "") or "").strip()
-        return truncate(f"🖼 {media}" + (f" — {caption}" if caption else ""), 120)
-    text = (getattr(message, "raw_text", "") or "").strip()
-    if text:
-        return truncate(text, 120)
-    return "_(no text)_"
-
-
-def _describe_media(message: Any) -> str:
-    for label, attr in (
-        ("photo", "photo"),
-        ("video", "video"),
-        ("voice", "voice"),
-        ("video note", "video_note"),
-        ("audio", "audio"),
-        ("sticker", "sticker"),
-        ("GIF", "gif"),
-        ("file", "document"),
-    ):
-        if getattr(message, attr, None):
-            return label
-    return "media"
-
-
-async def _sender_name(message: Any) -> str:
-    try:
-        sender = await message.get_sender()
-    except Exception:
-        sender = None
-    if sender is None:
-        return str(getattr(message, "sender_id", "?"))
-    name = " ".join(
-        filter(
-            None,
-            [getattr(sender, "first_name", "") or "", getattr(sender, "last_name", "") or ""],
-        )
-    ).strip()
-    username = getattr(sender, "username", None)
-    if name:
-        return name
-    if username:
-        return f"@{username}"
-    return str(getattr(sender, "id", "?"))
-
-
-def _message_link(chat_id: int, message_id: int) -> str:
-    """Best-effort deep link to a message.
-
-    For channels/supergroups Telegram uses the ``t.me/c/<id>/<msg>`` form with
-    the internal id stripped of the ``-100`` prefix. For private chats we fall
-    back to a link the official clients resolve against the open chat.
-    """
-    text_id = str(chat_id)
-    if text_id.startswith("-100"):
-        internal = text_id[4:]
-        if internal.isdigit():
-            return f"https://t.me/c/{internal}/{message_id}"
-    return f"tg://openmessage?chat_id={chat_id}&message_id={message_id}"
+# Re-exported for tests/backward compatibility.
+__all__ = [
+    "CATEGORY",
+    "MEDIA_ATTRS",
+    "MEDIA_TYPES",
+    "cmd_search",
+    "host_to_name",
+    "message_link",
+    "parse_date",
+]

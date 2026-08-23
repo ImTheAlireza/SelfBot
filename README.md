@@ -177,7 +177,7 @@ back-off; `ai` shows who is cooling down.
 | `info [user]` | User details and profile photo (reply, mention, or yourself) |
 | `qreply set\|remove\|list\|info` | Manage `-alias` shortcuts |
 | `-<alias>` | Expand a quick reply in place |
-| `search <text> [--from X] [--since D] [--until D] [--type media] [--limit N] [--global]` | Search this chat, or every chat in the account with `--global` |
+| `search <text> [filters]` | Paged search in this chat or `--global`; highlights matches, relative times, media details. Follow with `search more`/`back`/`page <n>`/`open <n>`/`recent`/`stop` |
 
 `del` always operates on the chat where the command was sent and can never
 select another chat. Without `-me`, it targets messages from everyone that your

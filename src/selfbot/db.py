@@ -497,6 +497,17 @@ class Database:
                 "CREATE INDEX IF NOT EXISTS idx_timers_user ON timers (user_id)",
                 "CREATE INDEX IF NOT EXISTS idx_ai_messages_chat ON ai_messages (chat_id, id)",
                 "CREATE INDEX IF NOT EXISTS idx_ai_providers_default ON ai_providers (is_default, enabled)",
+                """
+                CREATE TABLE IF NOT EXISTS search_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    label TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    is_saved INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """,
+                "CREATE INDEX IF NOT EXISTS idx_search_history_user ON search_history (user_id, created_at)",
             ]
         else:
             charset = "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
@@ -609,6 +620,17 @@ class Database:
                     enabled BOOLEAN NOT NULL DEFAULT TRUE,
                     loaded_at TIMESTAMP NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                ) {charset}
+                """,
+                f"""
+                CREATE TABLE IF NOT EXISTS search_history (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    label VARCHAR(512) NOT NULL,
+                    payload MEDIUMTEXT NOT NULL,
+                    is_saved BOOLEAN NOT NULL DEFAULT FALSE,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_search_history_user (user_id, created_at)
                 ) {charset}
                 """,
             ]
@@ -1352,6 +1374,103 @@ class Database:
     async def delete_plugin_state(self, name: str) -> int:
         return await self.execute(
             "DELETE FROM plugin_state WHERE name = %s", (name,)
+        )
+
+    # -- search history ----------------------------------------------------
+
+    async def add_search(
+        self,
+        user_id: int,
+        label: str,
+        payload: str,
+        *,
+        saved: bool = False,
+    ) -> int:
+        await self.execute(
+            "INSERT INTO search_history (user_id, label, payload, is_saved) "
+            "VALUES (%s, %s, %s, %s)",
+            (user_id, label, payload, 1 if saved else 0),
+        )
+        if self._backend == "sqlite":
+            row = await self.fetch_one("SELECT last_insert_rowid() AS id")
+            return int(row["id"]) if row else 0
+        row = await self.fetch_one(
+            "SELECT id FROM search_history WHERE user_id = %s "
+            "ORDER BY id DESC LIMIT 1",
+            (user_id,),
+        )
+        return int(row["id"]) if row else 0
+
+    async def list_searches(
+        self, user_id: int, *, saved_only: bool = False, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        if saved_only:
+            rows = await self.fetch_all(
+                "SELECT id, label, payload, is_saved, created_at "
+                "FROM search_history WHERE user_id = %s AND is_saved = 1 "
+                "ORDER BY id DESC LIMIT %s",
+                (user_id, limit),
+            )
+        else:
+            rows = await self.fetch_all(
+                "SELECT id, label, payload, is_saved, created_at "
+                "FROM search_history WHERE user_id = %s "
+                "ORDER BY id DESC LIMIT %s",
+                (user_id, limit),
+            )
+        return [
+            {
+                "id": int(r["id"]),
+                "label": r["label"],
+                "payload": r["payload"],
+                "saved": bool(r.get("is_saved", 0)),
+                "created_at": _as_aware(r.get("created_at")),
+            }
+            for r in rows
+        ]
+
+    async def get_search(self, search_id: int) -> dict[str, Any] | None:
+        row = await self.fetch_one(
+            "SELECT id, user_id, label, payload, is_saved, created_at "
+            "FROM search_history WHERE id = %s",
+            (search_id,),
+        )
+        if row is None:
+            return None
+        return {
+            "id": int(row["id"]),
+            "user_id": int(row["user_id"]),
+            "label": row["label"],
+            "payload": row["payload"],
+            "saved": bool(row.get("is_saved", 0)),
+            "created_at": _as_aware(row.get("created_at")),
+        }
+
+    async def set_search_saved(self, search_id: int, saved: bool) -> int:
+        return await self.execute(
+            "UPDATE search_history SET is_saved = %s WHERE id = %s",
+            (1 if saved else 0, search_id),
+        )
+
+    async def delete_search(self, search_id: int) -> int:
+        return await self.execute(
+            "DELETE FROM search_history WHERE id = %s", (search_id,)
+        )
+
+    async def prune_searches(self, user_id: int, keep: int = 50) -> int:
+        if self._backend == "sqlite":
+            return await self.execute(
+                "DELETE FROM search_history WHERE user_id = %s AND id NOT IN "
+                "(SELECT id FROM (SELECT id FROM search_history "
+                "WHERE user_id = %s ORDER BY id DESC LIMIT %s))",
+                (user_id, user_id, keep),
+            )
+        return await self.execute(
+            "DELETE h FROM search_history h LEFT JOIN ("
+            "  SELECT id FROM search_history WHERE user_id = %s "
+            "  ORDER BY id DESC LIMIT %s"
+            ") k ON h.id = k.id WHERE h.user_id = %s AND k.id IS NULL",
+            (user_id, keep, user_id),
         )
 
     # -- backup / restore --------------------------------------------------
