@@ -258,13 +258,13 @@ async def _gpt_edit(ctx: Context) -> None:
 async def cmd_summarize(ctx: Context) -> None:
     """Summarize a replied message, document, or the last N messages."""
     args = list(ctx.args)
-    brief = "-brief" in args or "--brief" in args
-    detailed = "-detailed" in args or "--detailed" in args
-    args = [a for a in args if a not in {"-brief", "--brief", "-detailed", "--detailed"}]
+    brief = "-brief" in args
+    detailed = "-detailed" in args
+    args = [a for a in args if a not in {"-brief", "-detailed"}]
 
     lang = None
-    if "-lang" in args or "--lang" in args:
-        idx = args.index("-lang") if "-lang" in args else args.index("--lang")
+    if "-lang" in args:
+        idx = args.index("-lang")
         if idx + 1 >= len(args):
             raise UsageError("Usage: `summarize ... -lang en|fa`")
         lang = args.pop(idx + 1).lower()
@@ -652,12 +652,12 @@ def _parse_add_args(args: list[str]) -> dict[str, str | None]:
     """
     flags: dict[str, str] = {}
     positional: list[str] = []
-    known_flags = {"-name", "--name", "-model", "--model"}
+    known_flags = {"-name", "-model"}
     index = 0
     while index < len(args):
         token = args[index]
         if token in known_flags and index + 1 < len(args):
-            flags[token[2:]] = args[index + 1]
+            flags[token[1:]] = args[index + 1]
             index += 2
         else:
             positional.append(token)

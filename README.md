@@ -207,7 +207,7 @@ Durations: `90`, `15:30`, `1:15:30`, `2:12:15:30`, or `1h30m`.
 ### Utilities
 | Command | Description |
 |---|---|
-| `qr <text> [--size N] [--fg c] [--bg c]` | Generate a QR code |
+| `qr <text> [-size N] [-fg c] [-bg c]`| | Generate a QR code |
 | `qrread` | Decode a QR from a replied image |
 | `topdf [en\|fa] [size]` | Convert replied text to PDF |
 | `weather <city>` / `hourly <city>` | Forecasts — no API key needed |
@@ -333,7 +333,7 @@ The original single-file `self.py` was replaced by the `src/selfbot/` package.
 4. Your existing MySQL data still works — set `DATABASE_URL` to point at it.
 
 Renamed commands: `zipfile`→`zip` (alias kept), `dw`→`weather` (alias kept),
-`hw`→`hourly` (alias kept), and `qradv` was folded into `qr --fg/--bg`.
+`hw`→`hourly` (alias kept), and `qradv` was folded into `qr -fg/-bg`.
 
 ### What changed under the hood
 

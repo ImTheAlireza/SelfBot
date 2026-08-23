@@ -53,10 +53,8 @@ _BOOL_FLAGS = {"-here", "-global", "-ungrouped", "-regex", "-exact"}
 
 # Accept the old double-dash forms transparently so muscle memory keeps
 # working: --from -> -from, --here -> -here, etc.
-_ALIASES = {f: f[1:] for f in (
-    "--from", "--since", "--until", "--type", "--chat", "--limit", "--order",
-    "--here", "--global", "--ungrouped", "--regex", "--exact",
-)}
+# No aliases: all flags use a single dash (e.g. -from, -here).
+_ALIASES: dict[str, str] = {}
 
 # Per-user active run / page / progress / task state.
 _active: dict[int, SearchRun] = {}
@@ -175,7 +173,7 @@ async def cmd_search(ctx: Context) -> None:
         return await _stop_search(ctx)
     if sub == "recent":
         return await _recent_searches(ctx)
-    if sub in {"help", "-h", "--help"}:
+    if sub in {"help", "-h"}:
         return await _help(ctx)
 
     # Fresh search.

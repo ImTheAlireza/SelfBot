@@ -396,7 +396,7 @@ def test_parse_add_args_minimal_url_key() -> None:
 def test_parse_add_args_flags() -> None:
     from selfbot.plugins.ai import _parse_add_args
 
-    r = _parse_add_args(["--model", "luna", "https://x/v1", "sk-xxx"])
+    r = _parse_add_args(["-model", "luna", "https://x/v1", "sk-xxx"])
     assert r["model"] == "luna" and r["name"] is None
 
 

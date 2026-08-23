@@ -41,11 +41,11 @@ BACKUP_SECTIONS = (
 )
 async def cmd_backup(ctx: Context) -> None:
     """Export bot data as a JSON document (provider keys redacted by default)."""
-    include_secrets = "-include-secrets" in ctx.args or "--include-secrets" in ctx.args
-    file_flag = "-file" in ctx.args or "--file" in ctx.args
+    include_secrets = "-include-secrets" in ctx.args
+    file_flag = "-file" in ctx.args
     filename = None
     if file_flag:
-        index = ctx.args.index("-file") if "-file" in ctx.args else ctx.args.index("--file")
+        index = ctx.args.index("-file")
         if index + 1 >= len(ctx.args):
             raise UsageError("Usage: `backup -file <name>`")
         filename = ctx.args[index + 1]
@@ -93,7 +93,7 @@ async def cmd_backup(ctx: Context) -> None:
 )
 async def cmd_restore(ctx: Context) -> None:
     """Restore data from a backup document (reply to the file)."""
-    force = "-force" in ctx.args or "--force" in ctx.args
+    force = "-force" in ctx.args
     replied = await ctx.get_reply_message()
     if not replied or not (replied.document or replied.file):
         raise ValidationError("Reply to a backup `.json`/`.enc` file.")

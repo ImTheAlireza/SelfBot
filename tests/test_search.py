@@ -198,12 +198,6 @@ def test_single_dash_flags_parsed() -> None:
     assert "here" in booleans
 
 
-def test_double_dash_still_accepted() -> None:
-    _tokens, values, booleans = _parse_args(["x", "--from", "alice", "--here"])
-    assert values["from"] == "alice"
-    assert "here" in booleans
-
-
 def test_build_query_global_by_default() -> None:
     q = _build_query(["invoice"], chat_id=CHAT_ID)
     assert q.global_search is True
