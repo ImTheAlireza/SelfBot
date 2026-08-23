@@ -138,8 +138,8 @@ which can deadlock when invoked by the process being restarted.
 | `setadmin <id\|@user>` | Let another user run commands |
 | `remadmin <id>` | Revoke access |
 | `adminlist` | List authorised users |
-| `backup [--include-secrets]` | 👑 Export all settings/data as JSON (keys redacted by default) |
-| `restore [--force]` | 👑 Restore from a replied backup file |
+| `backup [-include-secrets]` | 👑 Export all settings/data as JSON (keys redacted by default) |
+| `restore [-force]` | 👑 Restore from a replied backup file |
 
 ### AI
 | Command | Description |
@@ -149,7 +149,7 @@ which can deadlock when invoked by the process being restarted.
 | `ai [status\|add\|default\|enable\|disable\|remove\|test\|model]` | 👑 One command for all provider & model management |
 | `gptedit [instruction]` | 👑 Rewrite one of **your own** messages with AI, editing it in place |
 | `gptmemory on\|off\|clear\|turns\|status` | Per-chat conversation memory |
-| `summarize [n] [--lang en\|fa] [--brief\|--detailed]` | Summarize a replied message, document or last `n` messages |
+| `summarize [n] [-lang en\|fa] [-brief\|-detailed]` | Summarize a replied message, document or last `n` messages |
 
 The active model is simply **the default provider's model** — no confusing
 global override. To add and use a provider:
@@ -177,7 +177,7 @@ back-off; `ai` shows who is cooling down.
 | `info [user]` | User details and profile photo (reply, mention, or yourself) |
 | `qreply set\|remove\|list\|info` | Manage `-alias` shortcuts |
 | `-<alias>` | Expand a quick reply in place |
-| `search <text> [filters]` | Paged search in this chat or `--global`; highlights matches, relative times, media details. Follow with `search more`/`back`/`page <n>`/`open <n>`/`recent`/`stop` |
+| `search <text> [-here] [-from X] [-since D] [-type media]` | Account-wide by default (add `-here` for this chat). Paged, grouped results with match highlighting. Follow with `more`/`back`/`page <n>`/`open <n>`/`recent`/`stop` |
 
 `del` always operates on the chat where the command was sent and can never
 select another chat. Without `-me`, it targets messages from everyone that your
@@ -295,11 +295,11 @@ async def cmd_hello(ctx: Context) -> None:
 
 Manage them in chat: `plugin list`, `plugin load <path>`, `plugin reload <name>`,
 `plugin enable|disable <name>`, `plugin unload <name>`, and
-`plugin install <git-url|pip-spec> --trust`.
+`plugin install <git-url|pip-spec> -trust`.
 
 > **Warning:** external plugins run with full access to your Telegram account
 > and the host. Only install code you have reviewed — `install` requires
-> `--trust`.
+> `-trust`.
 
 ---
 

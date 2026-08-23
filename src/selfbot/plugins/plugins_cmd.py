@@ -149,13 +149,13 @@ async def _install(ctx: Context, manager: Any) -> None:
         raise UsageError(
             "Usage: `plugin install <git-url|pypi-spec> --trust`"
         )
-    if "--trust" not in args:
+    if "-trust" not in args and "--trust" not in args:
         raise ValidationError(
             "⚠️ External plugins run with **full access to your Telegram "
-            "account and this server**. Re-run with `--trust` once you have "
+            "account and this server**. Re-run with `-trust` once you have "
             "reviewed the code."
         )
-    args = [a for a in args if a != "--trust"]
+    args = [a for a in args if a not in {"-trust", "--trust"}]
     spec = " ".join(args).strip()
     if not spec:
         raise UsageError("Nothing to install.")

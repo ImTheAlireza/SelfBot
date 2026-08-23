@@ -570,53 +570,63 @@ async def _resolve_chat(client: Any, name: str) -> Any:
 
 
 def render_page(run: SearchRun, page: int) -> str:
-    """Render one page of results as a Markdown message."""
+    """Render one page of results as a clean, scannable Markdown message."""
     page = max(1, min(page, run.page_count))
     results = run.page(page)
     q = run.query
-    header_icon = "🌍" if q.global_search else "🔍"
-    scope = q.chat or ("all chats" if q.global_search else "this chat")
-    title = f'{header_icon} "{q.text}"' if q.text else f"{header_icon} {q.media or 'search'}"
-    lines = [
-        f"{title} · {scope} · {len(run.results)} result"
-        f"{'s' if len(run.results) != 1 else ''}",
-        f"page {page}/{run.page_count}",
-        "",
-    ]
 
-    offset = (page - 1) * q.page_size
-    for index, result in enumerate(results, start=offset + 1):
-        when = relative_time(result.date)
-        link = message_link(result.chat_id, result.message_id)
-        if q.global_search:
-            head = (
-                f"**{index}.** {result.chat_title} · {result.sender_name} · "
-                f"`{when}` · [open]({link})"
-            )
-        else:
-            head = (
-                f"**{index}.** {result.sender_name} · `{when}` · [open]({link})"
-            )
-        lines.append(head)
-        lines.append(f"   {result.snippet}")
+    lines = [_render_header(run, page)]
+
+    if q.global_search and not q.chat:
+        groups: dict[str, list[Result]] = {}
+        order: list[str] = []
+        for result in results:
+            groups.setdefault(result.chat_title, []).append(result)
+            if result.chat_title not in order:
+                order.append(result.chat_title)
+        counter = (page - 1) * q.page_size
+        for chat_title in order:
+            lines.append("")
+            lines.append(f"💬 **{chat_title}**")
+            for result in groups[chat_title]:
+                counter += 1
+                lines.append(_render_result(result, counter))
+    else:
         lines.append("")
+        for index, result in enumerate(results, start=(page - 1) * q.page_size + 1):
+            lines.append(_render_result(result, index))
 
     if run.cancelled:
-        lines.append("_⏹ search stopped — showing partial results._")
+        lines.extend(["", "_⏹ stopped — partial results_"])
+
     footer = _page_footer(page, run.page_count)
     if footer:
-        lines.append(footer)
+        lines.extend(["", footer])
     return "\n".join(lines).rstrip()
 
 
+def _render_header(run: SearchRun, page: int) -> str:
+    q = run.query
+    count = len(run.results)
+    title = f"\"{q.text}\"" if q.text else (q.media or "search")
+    scope = q.chat or ("this chat" if not q.global_search else "all chats")
+    noun = "result" if count == 1 else "results"
+    pager = f" · {page}/{run.page_count}" if run.page_count > 1 else ""
+    return f"🔍 **{title}** — {count} {noun} in {scope}{pager}"
+
+
+def _render_result(result: Result, number: int) -> str:
+    when = relative_time(result.date)
+    link = message_link(result.chat_id, result.message_id)
+    return (
+        f"`{number}` **{result.sender_name}** · {when} · [open]({link})\n"
+        f"    {result.snippet}"
+    )
+
+
 def _page_footer(page: int, page_count: int) -> str:
-    hints: list[str] = []
-    if page < page_count:
-        hints.append("`search more` for next page")
-    if page > 1:
-        hints.append("`search back` for previous")
-    hints.append("`search open <n>` to open a result")
-    return " · ".join(hints)
+    hints = ["`more`" if page < page_count else None, "`back`" if page > 1 else None, "`open <n>`"]
+    return "· " + " · ".join(h for h in hints if h)
 
 
 def render_empty(query: SearchQuery) -> str:

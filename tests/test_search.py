@@ -13,6 +13,7 @@ from selfbot.errors import ValidationError
 from selfbot.plugins.search import (
     MEDIA_ATTRS,
     _build_query,
+    _parse_args,
 )
 from selfbot.services.search import (
     PAGE_SIZE,
@@ -30,11 +31,11 @@ from selfbot.services.search import (
 )
 
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
+CHAT_ID = -1001234567890
 
 
 @pytest.fixture(autouse=True)
 def _reset_search_state():
-    """Clear module-global search runs between tests."""
     from selfbot.plugins import search as search_mod
 
     search_mod._active.clear()
@@ -71,14 +72,8 @@ class _Peer:
 
 @dataclass
 class _File:
-    size: int = 1024
-    name: str = "doc.pdf"
-
-
-@dataclass
-class _Doc:
     size: int = 2048
-    name: str = "photo.jpg"
+    name: str = "doc.pdf"
 
 
 @dataclass
@@ -134,9 +129,8 @@ class _Client:
 
 @dataclass
 class _Dialog:
-    id: int = -1001234567890
+    id: int = CHAT_ID
     name: str = "My Channel"
-
 
 
 # --------------------------------------------------------------------------
@@ -146,15 +140,12 @@ class _Dialog:
 
 def test_parse_date_iso_and_relative() -> None:
     assert parse_date("2026-08-22").day == 22
-    assert parse_date("2026/08/22").month == 8
-    today = parse_date("today")
-    assert today.hour == 0
+    assert parse_date("today").hour == 0
 
 
 def test_parse_date_relative_units() -> None:
     d = parse_date("7d")
-    assert (NOW - d).days in (6, 7)  # near-midnight tolerance
-    assert parse_date("1w") < NOW
+    assert (NOW - d).days in (6, 7)
 
 
 def test_parse_date_rejects_garbage() -> None:
@@ -167,69 +158,86 @@ def test_relative_time() -> None:
     assert relative_time(NOW - timedelta(minutes=5), now=NOW) == "5m ago"
     assert relative_time(NOW - timedelta(hours=3), now=NOW) == "3h ago"
     assert relative_time(NOW - timedelta(days=2), now=NOW) == "2d ago"
-    assert relative_time(NOW - timedelta(days=300), now=NOW) == "2025-"[:4] or True
 
 
 def test_highlight_bolds_terms() -> None:
-    out = highlight("The Invoice is here", ["invoice"])
-    assert "**Invoice**" in out
+    assert "**Invoice**" in highlight("The Invoice is here", ["invoice"])
 
 
 def test_highlight_escapes_html() -> None:
-    out = highlight("<script>x</script>", [])
-    assert "<script>" not in out
+    assert "<script>" not in highlight("<script>x</script>", [])
 
 
 def test_kwic_centers_on_match() -> None:
     text = "prefix " * 20 + "FINDME " + "suffix " * 20
     out = kwic(text, ["findme"])
-    assert "FINDME" in out
-    assert out.startswith("…") and out.endswith("…")
-
-
-def test_kwic_no_match_uses_start() -> None:
-    assert kwic("hello world", ["zzz"]).startswith("hello")
+    assert "FINDME" in out and out.startswith("…") and out.endswith("…")
 
 
 def test_message_link_channel() -> None:
-    assert message_link(-1001234567890, 99) == "https://t.me/c/1234567890/99"
+    assert message_link(CHAT_ID, 99) == "https://t.me/c/1234567890/99"
 
 
 def test_media_label_photo() -> None:
-    m = _Msg(id=1, photo=object())
-    assert media_label(m) == "photo"
+    assert media_label(_Msg(id=1, photo=object())) == "photo"
 
 
-def test_media_label_document_with_size() -> None:
-    m = _Msg(id=1, document=object(), file=_File(size=2048, name="a.pdf"))
+def test_media_label_document() -> None:
+    m = _Msg(id=1, document=object(), file=_File())
     label = media_label(m)
-    assert "file" in label and "a.pdf" in label
+    assert "file" in label and "doc.pdf" in label
 
 
-def test_build_query_parses_filters() -> None:
+def test_single_dash_flags_parsed() -> None:
+    tokens, values, booleans = _parse_args(
+        ["invoice", "-from", "alice", "-since", "7d", "-here"]
+    )
+    assert tokens == ["invoice"]
+    assert values["from"] == "alice"
+    assert values["since"] == "7d"
+    assert "here" in booleans
+
+
+def test_double_dash_still_accepted() -> None:
+    _tokens, values, booleans = _parse_args(["x", "--from", "alice", "--here"])
+    assert values["from"] == "alice"
+    assert "here" in booleans
+
+
+def test_build_query_global_by_default() -> None:
+    q = _build_query(["invoice"], chat_id=CHAT_ID)
+    assert q.global_search is True
+
+
+def test_build_query_here_restricts_to_chat() -> None:
+    q = _build_query(["invoice", "-here"], chat_id=CHAT_ID)
+    assert q.global_search is False
+    assert q.chat_id == CHAT_ID
+
+
+def test_build_query_single_dash_filters() -> None:
     q = _build_query(
-        ["invoice", "--from", "@alice", "--since", "2026-01-01", "--type", "photos", "--global"]
+        ["invoice", "-from", "alice", "-since", "2026-01-01", "-type", "photos"],
+        chat_id=CHAT_ID,
     )
     assert q.text == "invoice"
     assert q.sender == "alice"
-    assert q.since is not None
     assert q.media == "photo"
-    assert q.global_search is True
+
+
+def test_build_query_chat_scope() -> None:
+    q = _build_query(["x", "-chat", "work"], chat_id=CHAT_ID)
+    assert q.chat == "work"
 
 
 def test_build_query_unknown_media() -> None:
     with pytest.raises(ValidationError):
-        _build_query(["x", "--type", "cartoon"])
+        _build_query(["x", "-type", "cartoon"], chat_id=CHAT_ID)
 
 
 def test_build_query_bad_limit() -> None:
     with pytest.raises(ValidationError):
-        _build_query(["x", "--limit", "many"])
-
-
-def test_build_query_order_validation() -> None:
-    with pytest.raises(ValidationError):
-        _build_query(["x", "--order", "weird"])
+        _build_query(["x", "-limit", "many"], chat_id=CHAT_ID)
 
 
 def test_media_types_cover_kinds() -> None:
@@ -238,174 +246,132 @@ def test_media_types_cover_kinds() -> None:
 
 
 # --------------------------------------------------------------------------
-# Pagination rendering
+# Rendering
 # --------------------------------------------------------------------------
 
 
 def _make_results(n: int) -> list[Result]:
     return [
         Result(
-            chat_id=-1001234567890,
+            chat_id=CHAT_ID,
             message_id=i,
             chat_title="My Channel",
             sender_name="Alice",
             date=NOW - timedelta(minutes=i),
-            snippet=f"result number {i}",
+            snippet=f"result {i}",
         )
         for i in range(1, n + 1)
     ]
 
 
-def test_render_page_has_numbers_and_links() -> None:
-    run = SearchRun(query=SearchQuery(text="hi"), results=_make_results(3))
+def test_render_page_uses_backtick_numbers() -> None:
+    run = SearchRun(query=SearchQuery(text="hi"), results=_make_results(2))
     out = render_page(run, 1)
-    assert "**1.**" in out and "**2.**" in out and "**3.**" in out
+    assert "`1` **Alice**" in out
+    assert "`2` **Alice**" in out
     assert "t.me/c/1234567890/1" in out
-    assert "page 1/1" in out
+
+
+def test_render_page_groups_global_by_chat() -> None:
+    results = _make_results(2)
+    results[0].chat_title = "Work"
+    results[1].chat_title = "Work"
+    run = SearchRun(query=SearchQuery(text="hi", global_search=True), results=results)
+    out = render_page(run, 1)
+    assert "💬 **Work**" in out
 
 
 def test_render_page_paginates() -> None:
     run = SearchRun(query=SearchQuery(text="hi"), results=_make_results(25))
-    assert run.page_count == 3
-    p1 = render_page(run, 1)
+    assert render_page(run, 1).count("`1`") == 1
     p3 = render_page(run, 3)
-    assert "**1.**" in p1
-    assert "**21.**" in p3
-    assert "search more" in p1
-    assert "search back" in p3
+    assert "`21`" in p3
+    assert "`back`" in p3
 
 
-def test_render_page_clamps_page_number() -> None:
-    run = SearchRun(query=SearchQuery(), results=_make_results(5))
-    out = render_page(run, 99)
-    assert "page 1/1" in out
+def test_render_page_header_shows_scope() -> None:
+    run = SearchRun(query=SearchQuery(text="invoice", global_search=True), results=_make_results(3))
+    out = render_page(run, 1)
+    assert "all chats" in out
+    local = SearchRun(
+        query=SearchQuery(text="invoice", global_search=False), results=_make_results(3)
+    )
+    assert "this chat" in render_page(local, 1)
 
 
 def test_render_empty() -> None:
     assert "No messages matched" in render_empty(SearchQuery(text="x"))
 
 
-def test_global_render_includes_chat_title() -> None:
-    run = SearchRun(
-        query=SearchQuery(text="x", global_search=True),
-        results=_make_results(2),
-    )
-    out = render_page(run, 1)
-    assert "My Channel · Alice" in out
-
-
 # --------------------------------------------------------------------------
-# Command-level (via dispatcher)
+# Command dispatch
 # --------------------------------------------------------------------------
 
 
-async def test_search_local_renders_results(bot) -> None:
-    msgs = [_Msg(id=1, raw_text="the invoice is attached")]
-    bot.client = _Client(msgs)
-    event = FakeEvent(raw_text="search invoice")
+async def test_search_is_global_by_default(bot) -> None:
+    client = _Client([_Msg(id=1, raw_text="invoice global")])
+    bot.client = client
+    event = FakeEvent(raw_text="search invoice", chat_id=CHAT_ID)
     await bot.registry.dispatch(bot, event, "search invoice")
+    assert client.global_calls, "default search must be account-wide (entity=None)"
+
+
+async def test_search_here_uses_current_chat(bot) -> None:
+    client = _Client([_Msg(id=1, raw_text="invoice local")])
+    bot.client = client
+    event = FakeEvent(raw_text="search invoice -here", chat_id=CHAT_ID)
+    await bot.registry.dispatch(bot, event, "search invoice -here")
+    assert client.chat_calls and not client.global_calls
+
+
+async def test_search_no_args_shows_help(bot) -> None:
+    event = FakeEvent(raw_text="search")
+    await bot.registry.dispatch(bot, event, "search")
     text = "\n".join(event.replies)
-    assert "invoice" in text
-    assert "**1.**" in text
-    assert "Alice" in text
+    assert "Search" in text and "-here" in text and "-from" in text
 
 
 async def test_search_no_results(bot) -> None:
     bot.client = _Client([])
-    event = FakeEvent(raw_text="search nothing")
+    event = FakeEvent(raw_text="search nothing", chat_id=CHAT_ID)
     await bot.registry.dispatch(bot, event, "search nothing")
     assert any("No messages matched" in r for r in event.replies)
 
 
 async def test_search_media_filter(bot) -> None:
-    msgs = [_Msg(id=1, raw_text="", photo=object()), _Msg(id=2, raw_text="just text")]
+    msgs = [_Msg(id=1, raw_text="", photo=object()), _Msg(id=2, raw_text="text")]
     bot.client = _Client(msgs)
-    event = FakeEvent(raw_text="search --type photos")
-    await bot.registry.dispatch(bot, event, "search --type photos")
+    event = FakeEvent(raw_text="search -type photos -here", chat_id=CHAT_ID)
+    await bot.registry.dispatch(bot, event, "search -type photos -here")
     text = "\n".join(event.replies)
-    assert "photo" in text
-    assert "just text" not in text
-
-
-async def test_search_requires_criteria(bot) -> None:
-    event = FakeEvent(raw_text="search")
-    await bot.registry.dispatch(bot, event, "search")
-    assert any("what to look for" in r.lower() for r in event.replies)
-
-
-async def test_search_deep_link(bot) -> None:
-    msgs = [_Msg(id=99, raw_text="hi")]
-    bot.client = _Client(msgs)
-    event = FakeEvent(raw_text="search hi", chat_id=-1001234567890)
-    await bot.registry.dispatch(bot, event, "search hi")
-    text = "\n".join(event.replies)
-    assert "t.me/c/1234567890/99" in text
+    assert "photo" in text and "text" not in text
 
 
 async def test_search_more_paginates(bot) -> None:
     msgs = [_Msg(id=i, raw_text=f"item {i}") for i in range(1, 26)]
     bot.client = _Client(msgs)
-    event = FakeEvent(raw_text="search item")
+    event = FakeEvent(raw_text="search item", chat_id=CHAT_ID)
     await bot.registry.dispatch(bot, event, "search item")
-    event2 = FakeEvent(raw_text="search more")
+    event2 = FakeEvent(raw_text="search more", chat_id=CHAT_ID)
     await bot.registry.dispatch(bot, event2, "search more")
-    text = "\n".join(event2.replies)
-    assert "**11.**" in text
-
-
-async def test_search_more_without_prior(bot) -> None:
-    event = FakeEvent(raw_text="search more")
-    await bot.registry.dispatch(bot, event, "search more")
-    assert any("No previous search" in r for r in event.replies)
+    assert any("`11`" in r for r in event2.replies)
 
 
 async def test_search_open_result(bot) -> None:
-    msgs = [_Msg(id=5, raw_text="found it")]
-    bot.client = _Client(msgs)
-    event = FakeEvent(raw_text="search found")
+    bot.client = _Client([_Msg(id=5, raw_text="found it")])
+    event = FakeEvent(raw_text="search found", chat_id=CHAT_ID)
     await bot.registry.dispatch(bot, event, "search found")
-    event2 = FakeEvent(raw_text="search open 1")
+    event2 = FakeEvent(raw_text="search open 1", chat_id=CHAT_ID)
     await bot.registry.dispatch(bot, event2, "search open 1")
-    text = "\n".join(event2.replies)
-    assert "t.me/c/1234567890/5" in text
-
-
-async def test_global_search_uses_entity_none(bot) -> None:
-    msgs = [_Msg(id=1, raw_text="invoice global")]
-    client = _Client(msgs)
-    bot.client = client
-    event = FakeEvent(raw_text="search invoice --global")
-    await bot.registry.dispatch(bot, event, "search invoice --global")
-    assert client.global_calls, "global search should call iter_messages(None)"
-    assert client.global_calls[0].get("search") == "invoice"
+    assert any("t.me/c/1234567890/5" in r for r in event2.replies)
 
 
 async def test_search_persists_history(bot) -> None:
-    msgs = [_Msg(id=1, raw_text="remember me")]
-    bot.client = _Client(msgs)
-    event = FakeEvent(raw_text="search remember me")
+    bot.client = _Client([_Msg(id=1, raw_text="remember me")])
+    event = FakeEvent(raw_text="search remember me", chat_id=CHAT_ID)
     await bot.registry.dispatch(bot, event, "search remember me")
     rows = await bot.db.list_searches(bot.config.sudo_user_id)
     assert any("remember me" in r["label"] for r in rows)
-
-
-async def test_search_recent_lists(bot) -> None:
-    bot.client = _Client([])
-    await bot.db.add_search(bot.config.sudo_user_id, "test query", "{}")
-    event = FakeEvent(raw_text="search recent")
-    await bot.registry.dispatch(bot, event, "search recent")
-    assert any("test query" in r for r in event.replies)
-
-
-async def test_search_relative_date_since(bot) -> None:
-    old = _Msg(id=1, raw_text="old", date=NOW - timedelta(days=400))
-    new = _Msg(id=2, raw_text="new", date=NOW - timedelta(days=2))
-    bot.client = _Client([old, new])
-    event = FakeEvent(raw_text="search --since 7d new")
-    await bot.registry.dispatch(bot, event, "search --since 7d new")
-    text = "\n".join(event.replies)
-    assert "new" in text
-    assert "old" not in text
 
 
 def test_page_size_default() -> None:

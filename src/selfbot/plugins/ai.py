@@ -257,15 +257,15 @@ async def cmd_gptedit(ctx: Context) -> None:
 async def cmd_summarize(ctx: Context) -> None:
     """Summarize a replied message, document, or the last N messages."""
     args = list(ctx.args)
-    brief = "--brief" in args
-    detailed = "--detailed" in args
-    args = [a for a in args if a not in {"--brief", "--detailed"}]
+    brief = "-brief" in args or "--brief" in args
+    detailed = "-detailed" in args or "--detailed" in args
+    args = [a for a in args if a not in {"-brief", "--brief", "-detailed", "--detailed"}]
 
     lang = None
-    if "--lang" in args:
-        idx = args.index("--lang")
+    if "-lang" in args or "--lang" in args:
+        idx = args.index("-lang") if "-lang" in args else args.index("--lang")
         if idx + 1 >= len(args):
-            raise UsageError("Usage: `summarize ... --lang en|fa`")
+            raise UsageError("Usage: `summarize ... -lang en|fa`")
         lang = args.pop(idx + 1).lower()
         args.pop(idx)
         if lang not in {"en", "fa", "english", "persian", "farsi"}:
@@ -668,7 +668,7 @@ def _parse_add_args(args: list[str]) -> dict[str, str | None]:
     """
     flags: dict[str, str] = {}
     positional: list[str] = []
-    known_flags = {"--name", "--model"}
+    known_flags = {"-name", "--name", "-model", "--model"}
     index = 0
     while index < len(args):
         token = args[index]
