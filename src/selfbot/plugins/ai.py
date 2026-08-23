@@ -88,17 +88,26 @@ async def _delete_status(message: Any) -> None:
     examples=("gpt What is the meaning of life?",),
 )
 async def cmd_gpt(ctx: Context) -> None:
-    """Ask the active AI model. Shows which provider/model answered."""
+    """Ask the active AI model. Use `gpt edit` (reply) to rewrite a message."""
+    if ctx.args and ctx.args[0].lower() == "edit":
+        ctx.args = ctx.args[1:]
+        if ctx.raw_args.lower().startswith("edit"):
+            ctx.raw_args = ctx.raw_args[4:].strip()
+        return await _gpt_edit(ctx)
+
     prompt = ctx.raw_args.strip()
     if not prompt:
-        raise UsageError(f"Usage: `{ctx.config.command_prefix}gpt <prompt>`")
+        raise UsageError(
+            f"Usage: `{ctx.config.command_prefix}gpt <prompt>` "
+            f"or reply to a message with `{ctx.config.command_prefix}gpt edit [instruction]`"
+        )
 
     manager = get_manager(ctx)
     providers = await manager.providers(enabled_only=True)
     if not providers:
         raise FeatureDisabledError(
             "No AI provider is configured. Add one with "
-            "`ai add <name> <base_url> <api_key> [model]`."
+            "`ai add <base_url> <api_key> [model]`."
         )
 
     # Reply-to context: when the command is a reply, feed the quoted message
@@ -141,17 +150,17 @@ async def _memory_enabled(ctx: Context, manager: AIManager) -> bool:
 
 
 @command(
-    "gptmemory",
+    "memory",
     category=CATEGORY,
     sudo_only=False,
-    usage="gptmemory <on|off|clear|turns|status>",
-    examples=("gptmemory off", "gptmemory turns 6", "gptmemory clear"),
+    usage="memory <on|off|clear|turns|status>",
+    examples=("memory off", "memory turns 6", "memory clear"),
 )
-async def cmd_gptmemory(ctx: Context) -> None:
+async def cmd_memory(ctx: Context) -> None:
     """Control per-chat AI conversation memory."""
     if not ctx.args:
         raise UsageError(
-            "Usage: `gptmemory <on|off|clear|turns <n>|status>`"
+            "Usage: `memory <on|off|clear|turns <n>|status>`"
         )
 
     manager = get_manager(ctx)
@@ -168,7 +177,7 @@ async def cmd_gptmemory(ctx: Context) -> None:
         await ctx.reply(f"🗑 Cleared {removed} remembered message(s) for this chat.")
     elif action == "turns":
         if len(ctx.args) < 2 or not ctx.args[1].isdigit():
-            raise UsageError("Usage: `gptmemory turns <4..50>`")
+            raise UsageError("Usage: `memory turns <4..50>`")
         turns = int(ctx.args[1])
         if not 1 <= turns <= 50:
             raise ValidationError("Turns must be between 1 and 50.")
@@ -190,16 +199,8 @@ async def cmd_gptmemory(ctx: Context) -> None:
         )
 
 
-@command(
-    "gptedit",
-    category=CATEGORY,
-    sudo_only=True,
-    requires_reply=True,
-    usage="gptedit [instruction]",
-    examples=("gptedit make it more formal", "gptedit translate to English"),
-)
-async def cmd_gptedit(ctx: Context) -> None:
-    """Rewrite one of your own messages with AI, editing it in place."""
+async def _gpt_edit(ctx: Context) -> None:
+    """`gpt edit` — rewrite one of your own messages in place (reply to it)."""""
     replied = await ctx.get_reply_message()
     if replied is None:
         raise ValidationError("Reply to a message to rewrite it.")
@@ -207,7 +208,7 @@ async def cmd_gptedit(ctx: Context) -> None:
     my_id = getattr(ctx.bot.me, "id", None)
     if my_id is not None and getattr(replied, "sender_id", None) != my_id:
         raise ValidationError(
-            "You can only rewrite **your own** messages with `gptedit`."
+            "You can only rewrite **your own** messages with `gpt edit`."
         )
 
     original = (getattr(replied, "raw_text", "") or "").strip()
@@ -240,7 +241,7 @@ async def cmd_gptedit(ctx: Context) -> None:
     try:
         await ctx.event.delete()
     except Exception:
-        logger.debug("Could not delete the gptedit command message", exc_info=True)
+        logger.debug("Could not delete the gpt edit command message", exc_info=True)
 
 
 # --------------------------------------------------------------------------
@@ -288,7 +289,7 @@ async def cmd_summarize(ctx: Context) -> None:
 
         raise FeatureDisabledError(
             "No AI provider is configured. Add one with "
-            "`provider add <name> <base_url> <api_key> [model]`."
+            "`ai add <base_url> <api_key> [model]`."
         )
 
     text, label = await _collect_summary_text(ctx, count)
@@ -413,7 +414,7 @@ def _extract_document_text(path: Path) -> str:
     category=CATEGORY,
     sudo_only=True,
     usage=(
-        "ai [status|list|add|remove|default|enable|disable|test|model] ..."
+        "ai [add|remove|default|enable|disable|test|model|status] ..."
     ),
     examples=(
         "ai",
@@ -471,24 +472,7 @@ async def cmd_ai(ctx: Context) -> None:
         )
 
 
-# Aliases for the old separate commands, kept for muscle memory.
-@command("aistatus", category=CATEGORY, sudo_only=True, usage="aistatus", hidden=True)
-async def cmd_aistatus_alias(ctx: Context) -> None:
-    """Deprecated alias for `ai status`."""
-    ctx.args = ["status"]
-    await cmd_ai(ctx)
 
-
-@command(
-    "provider",
-    category=CATEGORY,
-    sudo_only=True,
-    usage="provider <add|list|default|...>",
-    hidden=True,
-)
-async def cmd_provider_alias(ctx: Context) -> None:
-    """Deprecated alias for `ai`."""
-    await cmd_ai(ctx)
 
 
 async def _ai_status(ctx: Context, manager: AIManager, *, verbose: bool) -> None:
@@ -782,68 +766,3 @@ async def _ai_toggle(
     manager.invalidate()
     verb = "enabled" if enabled else "disabled"
     await ctx.reply(f"✅ {verb.capitalize()} `{name}`.")
-
-
-# --------------------------------------------------------------------------
-# model (short alias for `ai model`)
-# --------------------------------------------------------------------------
-
-
-@command(
-    "model",
-    category=CATEGORY,
-    sudo_only=True,
-    usage="model [list|<model>|current]",
-    examples=("model", "model list", "model luna", "model bluesminds/luna"),
-)
-async def cmd_model(ctx: Context) -> None:
-    """Show or set the active AI model (shortcut for `ai model`)."""
-    manager = get_manager(ctx)
-    if not ctx.args:
-        m, provider = await manager.current_model()
-        await ctx.reply(f"🧠 Active model: `{m}` via **{provider}**.")
-        return
-    # Route through the ai model handler, but strip "model" from args.
-    ctx.args = ["model", *ctx.args]
-    await cmd_ai(ctx)
-
-
-# --------------------------------------------------------------------------
-# gptmodel — deprecated alias kept for backward compatibility
-# --------------------------------------------------------------------------
-
-
-@command(
-    "gptmodel",
-    category=CATEGORY,
-    sudo_only=True,
-    usage="gptmodel [list|set|current]",
-    hidden=True,
-)
-async def cmd_gptmodel_alias(ctx: Context) -> None:
-    """Deprecated: use `model` or `ai model`."""
-    manager = get_manager(ctx)
-    if not ctx.args:
-        m, provider = await manager.current_model()
-        await ctx.reply(
-            f"🧠 Active model: `{m}` via **{provider}**.\n"
-            "_(This command is now `model`.)_"
-        )
-        return
-    sub = ctx.args[0].lower()
-    if sub == "list":
-        ctx.args = ["model", "list"]
-        await cmd_ai(ctx)
-    elif sub == "current":
-        m, provider = await manager.current_model()
-        await ctx.reply(f"🧠 Active model: `{m}` via **{provider}**.")
-    elif sub == "set":
-        ctx.args = ["model", *ctx.args[1:]]
-        await cmd_ai(ctx)
-    elif sub == "clear":
-        await ctx.reply(
-            "ℹ️ There's no global override anymore — just set the model you "
-            "want with `model <name>`."
-        )
-    else:
-        raise ValidationError("Try `model list`, `model <name>`, or `model current`.")

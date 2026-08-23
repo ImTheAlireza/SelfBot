@@ -1,4 +1,4 @@
-"""Tests for gptmemory, gptedit, summarize and reply-context gpt."""
+"""Tests for memory, gpt edit, summarize and reply-context gpt."""
 
 from __future__ import annotations
 
@@ -56,26 +56,26 @@ class _Replied:
 
 
 # --------------------------------------------------------------------------
-# gptmemory
+# memory
 # --------------------------------------------------------------------------
 
 
-async def test_gptmemory_toggle_and_clear(bot) -> None:
-    event = FakeEvent(raw_text="gptmemory off")
+async def test_memory_toggle_and_clear(bot) -> None:
+    event = FakeEvent(raw_text="memory off")
     await bot.registry.dispatch(bot, event, event.raw_text)
     assert any("off" in r for r in event.replies)
 
-    event = FakeEvent(raw_text="gptmemory status")
+    event = FakeEvent(raw_text="memory status")
     await bot.registry.dispatch(bot, event, event.raw_text)
     assert any("🔴 off" in r for r in event.replies)
 
-    event = FakeEvent(raw_text="gptmemory clear")
+    event = FakeEvent(raw_text="memory clear")
     await bot.registry.dispatch(bot, event, event.raw_text)
     assert any("Cleared" in r for r in event.replies)
 
 
-async def test_gptmemory_turns_validation(bot) -> None:
-    event = FakeEvent(raw_text="gptmemory turns 99")
+async def test_memory_turns_validation(bot) -> None:
+    event = FakeEvent(raw_text="memory turns 99")
     await bot.registry.dispatch(bot, event, event.raw_text)
     assert any("between 1 and 50" in r for r in event.replies)
 
@@ -103,20 +103,20 @@ async def test_gpt_reply_includes_quoted_message(bot) -> None:
 
 
 # --------------------------------------------------------------------------
-# gptedit
+# gpt edit
 # --------------------------------------------------------------------------
 
 
-async def test_gptedit_refuses_others_messages(bot) -> None:
+async def test_gpt_edit_refuses_others_messages(bot) -> None:
     bot.me = type("M", (), {"id": 111})()
     replied = _Replied(raw_text="hello", sender_id=999)
-    event = FakeEvent(raw_text="gptedit", is_reply=True, reply_message=replied)
+    event = FakeEvent(raw_text="gpt edit", is_reply=True, reply_message=replied)
     event.reply_to = FakeReplyTo(reply_to_msg_id=replied.id)
     await bot.registry.dispatch(bot, event, event.raw_text)
     assert any("your own" in r for r in event.replies)
 
 
-async def test_gptedit_edits_own_message(bot) -> None:
+async def test_gpt_edit_edits_own_message(bot) -> None:
     from selfbot.plugins.ai import get_manager
 
     bot.me = type("M", (), {"id": 4242})()
@@ -125,7 +125,7 @@ async def test_gptedit_edits_own_message(bot) -> None:
     bot.http = _Http(answer="Rewritten!")
 
     replied = _Replied(raw_text="original", sender_id=4242, id=777)
-    event = FakeEvent(raw_text="gptedit make it shorter", is_reply=True, reply_message=replied)
+    event = FakeEvent(raw_text="gpt edit make it shorter", is_reply=True, reply_message=replied)
     event.reply_to = FakeReplyTo(reply_to_msg_id=777)
     await bot.registry.dispatch(bot, event, event.raw_text)
 

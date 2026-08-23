@@ -20,8 +20,7 @@
 
 ## What it does
 
-60+ commands for AI (with conversation memory, multiple providers and
-summarization), file manipulation, timers, stickers, QR codes, weather,
+57 commands across AI, file manipulation, timers, stickers, QR codes, weather,
 dictionaries, search, backups and chat automation — all driven from your own
 Telegram account by typing commands into any chat.
 
@@ -92,7 +91,7 @@ Telegram, storage, logging, and process settings are environment-driven. See
 | `COMMAND_PREFIX` | | *(none)* | Set to `.` to require `.help` |
 | `STARTUP_NOTIFY` | | `me` | Online message target: `me`, `off`, or a chat ID |
 | `LOG_CHANNEL_ID` | | — | Mirror warnings/errors to a private channel |
-| `ANYAPI_KEY` / `BLUESMINDS_API_KEY` / `RAPIDAPI_KEY` | | — | AI keys seeded into the DB on first run; managed afterward via `provider` |
+| `ANYAPI_KEY` / `BLUESMINDS_API_KEY` / `RAPIDAPI_KEY` | | — | AI keys seeded into the DB on first run; managed afterward via `ai` |
 | `HEALTH_PORT` / `HEALTH_BIND` | | disabled / `127.0.0.1` | Enable the `/healthz` HTTP endpoint |
 | `PLUGINS_DIR` | | `DATA_DIR/plugins` | Directory for external plugins |
 | `SUPERVISOR_PROCESS` | | `selfbot` | Enables supervisor-backed status and logs |
@@ -141,26 +140,25 @@ which can deadlock when invoked by the process being restarted.
 | `backup [-include-secrets]` | 👑 Export all settings/data as JSON (keys redacted by default) |
 | `restore [-force]` | 👑 Restore from a replied backup file |
 
-### AI
+### AI — 4 commands
 | Command | Description |
 |---|---|
-| `gpt <prompt>` | Ask the **active** model. Reply to a message to feed it as context. The answer is footed with the provider/model that was used. |
-| `model [list\|<model>\|current]` | 👑 Show or set the active model (e.g. `model luna` or `model bluesminds/luna`) |
-| `ai [status\|add\|default\|enable\|disable\|remove\|test\|model]` | 👑 One command for all provider & model management |
-| `gptedit [instruction]` | 👑 Rewrite one of **your own** messages with AI, editing it in place |
-| `gptmemory on\|off\|clear\|turns\|status` | Per-chat conversation memory |
+| `gpt <prompt>` | Ask the active model. Reply to a message to feed it as context. Reply with `gpt edit [instruction]` to rewrite one of **your own** messages in place. |
+| `memory on\|off\|clear\|turns <n>\|status` | Per-chat conversation memory |
 | `summarize [n] [-lang en\|fa] [-brief\|-detailed]` | Summarize a replied message, document or last `n` messages |
+| `ai [add\|remove\|default\|enable\|disable\|test\|model\|status]` | 👑 Manage providers and the active model — the **only** place to do so |
 
-The active model is simply **the default provider's model** — no confusing
-global override. To add and use a provider:
+There is exactly **one** chat command (`gpt`) and **one** management command
+(`ai`). No aliases, no overlapping commands. To add and use a provider:
 
 ```
-ai add bluesminds https://api.bluesminds.com/v1 sk-your-key luna
-ai default bluesminds
-model          # → "luna via bluesminds"
+ai add https://api.openai.com/v1 sk-your-key gpt-4o-mini
+ai default openai
+ai              # status: active model + all providers
+ai model        # show active model
+ai model list   # discover models
+ai model luna   # set model on the default provider
 ```
-
-Or switch models on the default provider anytime: `model luna`.
 
 Providers and API keys are stored **in the database** (encrypted at rest),
 not in `.env`. Keys still present in `ANYAPI_KEY` / `BLUESMINDS_API_KEY` /
@@ -177,7 +175,7 @@ back-off; `ai` shows who is cooling down.
 | `info [user]` | User details and profile photo (reply, mention, or yourself) |
 | `qreply set\|remove\|list\|info` | Manage `-alias` shortcuts |
 | `-<alias>` | Expand a quick reply in place |
-| `search <text> [-here] [-from X] [-since D] [-type media]` | Account-wide by default (add `-here` for this chat). Paged, grouped results with match highlighting. Follow with `more`/`back`/`page <n>`/`open <n>`/`recent`/`stop` |
+| `search <text> [-here] [-from X] [-since D] [-type media]` | Account-wide by default (add `-here` for this chat). Paged results; navigate with `more`, `back`, `page <n>`, `open <n>`, `recent`, `stop`. |
 
 `del` always operates on the chat where the command was sent and can never
 select another chat. Without `-me`, it targets messages from everyone that your
@@ -308,7 +306,7 @@ Manage them in chat: `plugin list`, `plugin load <path>`, `plugin reload <name>`
 ```bash
 pip install -e ".[dev,full]"
 
-pytest                      # 398 tests
+pytest                      # 434 tests
 pytest --cov=selfbot        # with coverage
 ruff check src tests        # lint
 mypy src/selfbot            # type check

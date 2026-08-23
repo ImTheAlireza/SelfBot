@@ -161,9 +161,9 @@ async def cmd_search(ctx: Context) -> None:
     """Search messages across your account (or this chat with -here)."""
     sub = ctx.args[0].lower() if ctx.args else ""
 
-    if sub in {"more", "next"}:
+    if sub == "more":
         return await _show_page(ctx, _pages.get(ctx.sender_id, 1) + 1)
-    if sub in {"back", "prev", "previous"}:
+    if sub == "back":
         return await _show_page(ctx, max(1, _pages.get(ctx.sender_id, 1) - 1))
     if sub == "page":
         if len(ctx.args) < 2 or not ctx.args[1].isdigit():
@@ -175,10 +175,6 @@ async def cmd_search(ctx: Context) -> None:
         return await _stop_search(ctx)
     if sub == "recent":
         return await _recent_searches(ctx)
-    if sub == "saved":
-        return await _saved_searches(ctx)
-    if sub == "save":
-        return await _save_search(ctx)
     if sub in {"help", "-h", "--help"}:
         return await _help(ctx)
 
@@ -314,28 +310,6 @@ async def _recent_searches(ctx: Context) -> None:
         lines.append(f"`{row['id']:>3}` {marker}{truncate(row['label'], 70)}")
     lines.append("\nType a new `search`, or `search saved` for bookmarks.")
     await ctx.reply("\n".join(lines))
-
-
-async def _saved_searches(ctx: Context) -> None:
-    rows = await ctx.db.list_searches(ctx.sender_id, saved_only=True, limit=30)
-    if not rows:
-        await ctx.reply("ℹ️ No saved searches. Use `search save <id>` after searching.")
-        return
-    lines = ["⭐ **Saved searches**\n"]
-    for row in rows:
-        lines.append(f"`{row['id']:>3}` {truncate(row['label'], 70)}")
-    await ctx.reply("\n".join(lines))
-
-
-async def _save_search(ctx: Context) -> None:
-    if len(ctx.args) < 2 or not ctx.args[1].isdigit():
-        raise UsageError("Usage: `search save <recent-id>`")
-    search_id = int(ctx.args[1])
-    row = await ctx.db.get_search(search_id)
-    if row is None or row["user_id"] != ctx.sender_id:
-        raise ValidationError(f"No recent search #{search_id}.")
-    await ctx.db.set_search_saved(search_id, True)
-    await ctx.reply(f"⭐ Saved search #{search_id}.")
 
 
 # --------------------------------------------------------------------------

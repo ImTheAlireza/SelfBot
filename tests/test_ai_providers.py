@@ -283,8 +283,8 @@ async def test_gpt_no_providers_reports_setup(bot: FakeBot) -> None:
     assert any("ai add" in r or "ANYAPI_KEY" in r for r in event.replies)
 
 
-async def test_model_command_shows_active(bot: FakeBot) -> None:
-    event = FakeEvent(raw_text="model")
+async def test_ai_model_shows_active(bot: FakeBot) -> None:
+    event = FakeEvent(raw_text="ai model")
     await bot.registry.dispatch(bot, event, event.raw_text)
     assert any(ANYAPI_DEFAULT_MODEL in r for r in event.replies)
 
@@ -295,15 +295,15 @@ async def test_ai_status_lists_config_provider(bot: FakeBot) -> None:
     assert any("rapidapi" in r.lower() for r in event.replies)
 
 
-async def test_ai_set_model_via_model_command(bot: FakeBot) -> None:
+async def test_ai_set_model_via_ai_model(bot: FakeBot) -> None:
     # The test config has a rapidapi (non-openai) provider, so add an openai one.
     await bot.db.add_provider(
         "bluesminds", "https://api.bluesminds.com/v1", "sk-bm",
         model="old-model", is_default=True, kind="openai",
     )
     bot.ai = None  # force manager to reload cache
-    event = FakeEvent(raw_text="model luna")
-    await bot.registry.dispatch(bot, event, "model luna")
+    event = FakeEvent(raw_text="ai model luna")
+    await bot.registry.dispatch(bot, event, "ai model luna")
     assert any("luna" in r for r in event.replies)
     p = await bot.db.get_provider("bluesminds")
     assert p is not None and p.model == "luna"
@@ -316,11 +316,6 @@ class ContextStub:
         self.bot = bot
 
 
-async def test_provider_alias_still_works(bot: FakeBot) -> None:
-    event = FakeEvent(raw_text="provider")
-    await bot.registry.dispatch(bot, event, event.raw_text)
-    # provider is now an alias for `ai` — shows status.
-    assert event.replies
 
 
 async def test_ai_add_validates_url(bot: FakeBot) -> None:

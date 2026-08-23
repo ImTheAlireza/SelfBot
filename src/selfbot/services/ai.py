@@ -7,7 +7,7 @@ The :class:`AIManager` owns everything the ``gpt`` family of commands needs:
 * automatic cooldown after quota/rate-limit errors,
 * success/failure counters persisted per provider,
 * per-chat conversation memory (rolled out from here in phase 3),
-* live ``/models`` discovery for ``gptmodel list``.
+* live ``/models`` discovery for ``ai model list``.
 
 The low-level HTTP call shapes (URLs, headers, JSON bodies) are kept identical
 to the original ``plugins/ai.py`` implementation so existing behaviour and the
