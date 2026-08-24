@@ -9,13 +9,14 @@ The :class:`AIManager` owns everything the ``gpt`` family of commands needs:
 * per-chat conversation memory (rolled out from here in phase 3),
 * live ``/models`` discovery for ``ai model list``.
 
-The low-level HTTP call shapes (URLs, headers, JSON bodies) are kept identical
-to the original ``plugins/ai.py`` implementation so existing behaviour and the
-tests that pin it continue to pass.
+The low-level HTTP layer handles both ordinary JSON completions and OpenAI-style
+SSE streams while keeping provider errors, fallback and cooldown behaviour
+consistent across gateways.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections.abc import Mapping, Sequence
@@ -39,6 +40,7 @@ __all__ = [
     "SYSTEM_PROMPT",
     "AIManager",
     "ProviderStatus",
+    "extract_stream_answer",
     "seed_providers_from_env",
 ]
 
@@ -93,47 +95,213 @@ async def openai_completion(
     base_url: str,
     model: str,
     timeout: float = 120.0,
+    temperature: float = 0.7,
+    max_tokens: int = 1000,
 ) -> str:
-    """Request a chat completion from an OpenAI-compatible endpoint."""
-    url = f"{base_url.rstrip('/')}/chat/completions"
-    response = await http.request(
-        "POST",
-        url,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": model,
-            "temperature": 1,
-            "messages": list(messages),
-        },
-        timeout=timeout,
-        # A retry after an uncertain timeout can duplicate a billable request.
-        retries=0,
-    )
+    """Request an OpenAI-compatible completion, accepting JSON or SSE.
 
+    Streaming is requested because some compatible gateways document that as
+    their primary mode. The shared HTTP client buffers the finite response and
+    this function joins the SSE deltas before returning the final Telegram
+    message. If a gateway explicitly rejects the ``stream`` parameter, one
+    safe non-stream retry is made after the 4xx response.
+    """
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream, application/json",
+    }
+    body = {
+        "model": model,
+        "messages": list(messages),
+        "stream": True,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+
+    for stream in (True, False):
+        body["stream"] = stream
+        response = await http.request(
+            "POST",
+            url,
+            headers=headers,
+            json=dict(body),
+            timeout=timeout,
+            # A retry after an uncertain timeout can duplicate a billable request.
+            retries=0,
+        )
+        try:
+            return await _openai_response_text(response)
+        except ProviderStatusError as exc:
+            # Retry only when the server rejected streaming before generating a
+            # completion. Authentication, quota and upstream errors must not be
+            # repeated, and a malformed successful stream may already be billed.
+            if stream and _stream_parameter_rejected(exc):
+                logger.info("Provider rejected SSE streaming; retrying as JSON")
+                continue
+            raise
+
+    raise ProviderError("AI provider did not return a completion.")
+
+
+async def _openai_response_text(response: Any) -> str:
+    """Decode one OpenAI response without trusting its Content-Type header."""
+    raw = ""
     try:
         payload = await response.json(content_type=None)
-    except Exception as exc:
-        raise ProviderStatusError(
-            f"Provider sent an invalid response (HTTP {response.status}).",
-            response.status,
-        ) from exc
+    except Exception:
+        try:
+            raw = await response.text()
+        except Exception:
+            raw = ""
+        payload = _json_body(raw)
 
-    if response.status >= 400:
+    status = int(getattr(response, "status", 0) or 0)
+    if status >= 400:
+        error_payload = payload if payload is not None else raw
         raise ProviderStatusError(
-            format_provider_error(payload, response.status, "AI provider"),
-            response.status,
+            format_provider_error(error_payload, status, "AI provider"), status
         )
 
     if isinstance(payload, Mapping) and payload.get("error"):
         raise ProviderStatusError(
-            format_provider_error(payload, response.status or 400, "AI provider"),
-            response.status or 400,
+            format_provider_error(payload, status or 400, "AI provider"),
+            status or 400,
         )
 
-    return extract_answer(payload, "AI provider")
+    # Some test doubles and permissive gateways return the SSE body as a JSON
+    # string. Detect it before treating it as an ordinary plain-text answer.
+    if isinstance(payload, str) and _looks_like_event_stream(payload):
+        return extract_stream_answer(payload)
+    if payload is not None:
+        return extract_answer(payload, "AI provider")
+    if _looks_like_event_stream(raw):
+        return extract_stream_answer(raw)
+
+    preview = raw.strip()[:160]
+    detail = f": {preview}" if preview else ""
+    raise ProviderStatusError(
+        f"AI provider sent an invalid response (HTTP {status}){detail}.",
+        status,
+    )
+
+
+def _json_body(raw: str) -> Any | None:
+    if not raw.strip():
+        return None
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _looks_like_event_stream(raw: str) -> bool:
+    stripped = raw.lstrip("\ufeff \t\r\n")
+    return stripped.startswith(("data:", "event:", ":"))
+
+
+def _stream_parameter_rejected(exc: ProviderStatusError) -> bool:
+    if exc.status not in {400, 415, 422}:
+        return False
+    message = str(exc).lower()
+    return "stream" in message and any(
+        word in message
+        for word in ("unsupported", "unknown", "invalid", "not allowed", "unrecognized")
+    )
+
+
+def extract_stream_answer(raw: str, provider: str = "AI provider") -> str:
+    """Join text deltas from an OpenAI-compatible SSE response.
+
+    Handles standard ``data: {...}`` server-sent events, multi-line SSE data,
+    comment/metadata fields and newline-delimited JSON used by a few gateways.
+    Whitespace inside deltas is preserved so ``"Hello"`` + ``" world"`` does
+    not accidentally become ``"Helloworld"``.
+    """
+    pieces: list[str] = []
+    data_lines: list[str] = []
+
+    def consume(data: str) -> bool:
+        data = data.strip("\r\n")
+        if not data:
+            return False
+        if data.strip() == "[DONE]":
+            return True
+        try:
+            chunk = json.loads(data)
+        except (TypeError, ValueError):
+            # A few proxies emit a plain text delta after ``data:``.
+            pieces.append(data)
+            return False
+        if not isinstance(chunk, Mapping):
+            return False
+        if chunk.get("error"):
+            raise ProviderError(format_provider_error(chunk, 400, provider))
+        piece = _stream_chunk_text(chunk)
+        if piece:
+            pieces.append(piece)
+        return False
+
+    for raw_line in raw.lstrip("\ufeff").splitlines():
+        line = raw_line.rstrip("\r")
+        if not line:
+            if data_lines and consume("\n".join(data_lines)):
+                break
+            data_lines.clear()
+            continue
+        if line.startswith("data:"):
+            data_lines.append(line[5:].lstrip(" "))
+            continue
+        if line.startswith(("event:", "id:", "retry:", ":")):
+            continue
+        # Tolerate NDJSON in addition to strict SSE.
+        if (
+            not data_lines
+            and line.lstrip().startswith(("{", "["))
+            and consume(line.strip())
+        ):
+            break
+
+    if data_lines:
+        consume("\n".join(data_lines))
+
+    answer = "".join(pieces).strip()
+    if not answer:
+        raise ProviderError(f"{provider} returned an empty streamed completion.")
+    return answer
+
+
+def _stream_chunk_text(chunk: Mapping[str, Any]) -> str:
+    choices = chunk.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    choice = choices[0]
+    if not isinstance(choice, Mapping):
+        return ""
+
+    delta = choice.get("delta")
+    if isinstance(delta, Mapping):
+        return _raw_content_text(delta.get("content"))
+    message = choice.get("message")
+    if isinstance(message, Mapping):
+        return _raw_content_text(message.get("content"))
+    text = choice.get("text")
+    return text if isinstance(text, str) else ""
+
+
+def _raw_content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    pieces: list[str] = []
+    for part in content:
+        if isinstance(part, str):
+            pieces.append(part)
+        elif isinstance(part, Mapping) and isinstance(part.get("text"), str):
+            pieces.append(part["text"])
+    return "".join(pieces)
 
 
 async def rapidapi_completion(http: Any, *, prompt: str, api_key: str) -> str:
@@ -289,7 +457,9 @@ def content_text(content: Any) -> str:
 def format_provider_error(payload: Any, status: int, provider: str) -> str:
     """Turn a provider error response into a short, actionable message."""
     detail = ""
-    if isinstance(payload, Mapping):
+    if isinstance(payload, str):
+        detail = payload.strip()
+    elif isinstance(payload, Mapping):
         error = payload.get("error")
         if isinstance(error, Mapping):
             for key in ("message", "detail", "error"):

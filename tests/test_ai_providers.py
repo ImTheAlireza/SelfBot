@@ -10,7 +10,7 @@ import pytest
 
 from conftest import FakeBot, FakeEvent
 from selfbot.config import AIConfig
-from selfbot.errors import FeatureDisabledError
+from selfbot.errors import FeatureDisabledError, ProviderError
 from selfbot.registry import CommandRegistry
 from selfbot.services.ai import (
     ANYAPI_DEFAULT_MODEL,
@@ -91,7 +91,57 @@ async def test_chat_uses_default_openai_provider(db) -> None:
     call = http.calls[0]
     assert call["url"] == "https://api.anyapi.ai/v1/chat/completions"
     assert call["headers"]["Authorization"] == "Bearer sk-test"
+    assert call["headers"]["Accept"] == "text/event-stream, application/json"
     assert call["json"]["model"] == "m1"
+    assert call["json"]["stream"] is True
+    assert call["json"]["temperature"] == 0.7
+    assert call["json"]["max_tokens"] == 1000
+
+
+async def test_chat_joins_openai_sse_deltas(db) -> None:
+    await db.add_provider(
+        "bai", "https://api.b.ai/v1", "sk-test", model="gpt-5.2", is_default=True
+    )
+    stream = (
+        'data: {"choices":[{"delta":{"role":"assistant","content":"Hello"}}]}\n\n'
+        'data: {"choices":[{"delta":{"content":" world"}}]}\n\n'
+        'data: {"choices":[{"delta":{"content":"!"},"finish_reason":null}]}\n\n'
+        "data: [DONE]\n\n"
+    )
+    http = _Http(default=_Resp(stream))
+    manager = AIManager(_ManagerBot(db, _ai_config(), http))
+
+    assert await manager.chat("hi", history=False) == "Hello world!"
+    assert len(http.calls) == 1
+    assert http.calls[0]["json"]["stream"] is True
+
+
+async def test_chat_retries_as_json_when_provider_rejects_streaming(db) -> None:
+    await db.add_provider(
+        "legacy", "https://legacy.example/v1", "sk-test", model="m1", is_default=True
+    )
+    http = _Http(
+        responses=[
+            _Resp({"error": {"message": "stream is unsupported"}}, status=400),
+            _Resp({"choices": [{"message": {"content": "fallback JSON"}}]}),
+        ]
+    )
+    manager = AIManager(_ManagerBot(db, _ai_config(), http))
+
+    assert await manager.chat("hi", history=False) == "fallback JSON"
+    assert [call["json"]["stream"] for call in http.calls] == [True, False]
+
+
+async def test_chat_does_not_retry_authentication_errors(db) -> None:
+    await db.add_provider(
+        "bad", "https://bad.example/v1", "sk-bad", model="m1", is_default=True
+    )
+    http = _Http(default=_Resp({"error": {"message": "bad key"}}, status=401))
+    manager = AIManager(_ManagerBot(db, _ai_config(), http))
+
+    with pytest.raises(ProviderError, match="rejected the API key"):
+        await manager.chat("hi", history=False)
+    assert len(http.calls) == 1
 
 
 async def test_chat_falls_back_to_next_provider_on_429(db) -> None:
@@ -321,7 +371,26 @@ class ContextStub:
 async def test_ai_add_validates_url(bot: FakeBot) -> None:
     event = FakeEvent(raw_text="ai add bad example.com kxxx model")
     await bot.registry.dispatch(bot, event, event.raw_text)
+    assert event.deleted
     assert any("http://" in r or "https://" in r for r in event.replies)
+
+
+async def test_ai_add_bai_normalizes_endpoint_and_deletes_key_message(bot: FakeBot) -> None:
+    event = FakeEvent(
+        raw_text=(
+            "ai add bai https://api.b.ai/v1/chat/completions "
+            "sk-example-secret-key gpt-5.2"
+        )
+    )
+
+    await bot.registry.dispatch(bot, event, event.raw_text)
+
+    assert event.deleted
+    provider = await bot.db.get_provider("bai")
+    assert provider is not None
+    assert provider.base_url == "https://api.b.ai/v1"
+    assert provider.model == "gpt-5.2"
+    assert provider.api_key == "sk-example-secret-key"
 
 
 async def test_gpt_reply_footer_shows_provider_and_model(bot: FakeBot) -> None:
@@ -393,6 +462,19 @@ def test_parse_add_args_minimal_url_key() -> None:
     assert r["name"] is None and r["model"] == ""
 
 
+def test_parse_add_args_accepts_authorization_bearer_format() -> None:
+    from selfbot.plugins.ai import _parse_add_args
+
+    separate = _parse_add_args(
+        ["bai", "https://api.b.ai/v1", "Bearer", "sk-secret", "gpt-5.2"]
+    )
+    quoted = _parse_add_args(
+        ["bai", "https://api.b.ai/v1", "Bearer sk-secret", "gpt-5.2"]
+    )
+    assert separate["api_key"] == quoted["api_key"] == "sk-secret"
+    assert separate["model"] == quoted["model"] == "gpt-5.2"
+
+
 def test_parse_add_args_flags() -> None:
     from selfbot.plugins.ai import _parse_add_args
 
@@ -430,6 +512,20 @@ def test_normalize_base_url_appends_v1_to_bare_host() -> None:
     assert _normalize_base_url("https://agentrouter.org/") == "https://agentrouter.org/v1"
     assert _normalize_base_url("https://api.openai.com/v1") == "https://api.openai.com/v1"
     assert _normalize_base_url("https://host/custom") == "https://host/custom"
+
+
+def test_normalize_base_url_accepts_full_endpoint_from_api_examples() -> None:
+    from selfbot.plugins.ai import _normalize_base_url
+
+    assert (
+        _normalize_base_url("https://api.b.ai/v1/chat/completions")
+        == "https://api.b.ai/v1"
+    )
+    assert _normalize_base_url("https://api.b.ai/v1/models") == "https://api.b.ai/v1"
+    assert (
+        _normalize_base_url("https://host/openai/v1/chat/completions?debug=1")
+        == "https://host/openai/v1"
+    )
 
 
 async def test_test_provider_tries_v1_fallback_and_corrects(db) -> None:

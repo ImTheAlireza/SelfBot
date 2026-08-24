@@ -81,14 +81,17 @@ async def test_gpt_uses_anyapi_when_configured(bot, registry):
     assert kwargs["headers"] == {
         "Authorization": "Bearer sk-test-key",
         "Content-Type": "application/json",
+        "Accept": "text/event-stream, application/json",
     }
     assert kwargs["json"] == {
         "model": ANYAPI_DEFAULT_MODEL,
-        "temperature": 1,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": "hello there"},
         ],
+        "stream": True,
+        "temperature": 0.7,
+        "max_tokens": 1000,
     }
     assert kwargs["timeout"] == 120
     assert kwargs["retries"] == 0

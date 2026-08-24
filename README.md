@@ -153,6 +153,7 @@ There is exactly **one** chat command (`gpt`) and **one** management command
 
 ```
 ai add https://api.openai.com/v1 sk-your-key gpt-4o-mini
+ai add bai https://api.b.ai/v1 sk-your-key gpt-5.2
 ai default openai
 ai              # status: active model + all providers
 ai model        # show active model
@@ -161,10 +162,13 @@ ai model luna   # set model on the default provider
 ```
 
 Providers and API keys are stored **in the database** (encrypted at rest),
-not in `.env`. Keys still present in `ANYAPI_KEY` / `BLUESMINDS_API_KEY` /
-`RAPIDAPI_KEY` are seeded automatically on first start. When a provider
-returns a quota/rate-limit error it is temporarily skipped with exponential
-back-off; `ai` shows who is cooling down.
+not in `.env`; the `ai add` message containing the plaintext key is deleted
+automatically. Both ordinary OpenAI JSON responses and streamed SSE deltas are
+supported. A copied full endpoint such as `/v1/chat/completions` is normalized
+to its base URL automatically. Keys still present in `ANYAPI_KEY` /
+`BLUESMINDS_API_KEY` / `RAPIDAPI_KEY` are seeded automatically on first start.
+When a provider returns a quota/rate-limit error it is temporarily skipped with
+exponential back-off; `ai` shows who is cooling down.
 
 ### Messaging
 | Command | Description |
@@ -306,7 +310,7 @@ Manage them in chat: `plugin list`, `plugin load <path>`, `plugin reload <name>`
 ```bash
 pip install -e ".[dev,full]"
 
-pytest                      # 434 tests
+pytest                      # 441 tests
 pytest --cov=selfbot        # with coverage
 ruff check src tests        # lint
 mypy src/selfbot            # type check

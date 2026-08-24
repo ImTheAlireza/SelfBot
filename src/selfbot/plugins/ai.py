@@ -435,6 +435,13 @@ async def cmd_ai(ctx: Context) -> None:
     if action in {"status", "list", "ls", ""}:
         await _ai_status(ctx, manager, verbose=(action in {"list", "ls"}))
     elif action == "add":
+        # The command contains a plaintext API key. Remove it from Telegram as
+        # early as possible; the encrypted database copy is the only one that
+        # should remain after setup.
+        try:
+            await ctx.event.delete()
+        except Exception:
+            logger.debug("Could not delete ai add command containing a key", exc_info=True)
         await _ai_add(ctx, manager, args)
     elif action == "remove":
         if not args:
@@ -638,7 +645,7 @@ async def _ai_add(ctx: Context, manager: AIManager, args: list[str]) -> None:
         f"Set its model with `ai model {name}/<model>` "
         "or switch defaults with `ai default <name>`."
     )
-    note = "\n💡 Added `/v1` to the base URL automatically." if corrected else ""
+    note = "\n💡 Normalized the URL to the API base URL." if corrected else ""
     await ctx.reply(
         f"✅ Added provider `{name}` at `{base_url.rstrip('/')}`{suffix}.{note}\n{hint}"
     )
@@ -689,6 +696,12 @@ def _parse_add_args(args: list[str]) -> dict[str, str | None]:
     # the URL. Tokens after the key are the model. This makes the natural
     # `ai add <url> <key> [model]` order work with no name supplied.
     name = flags.get("name") or (" ".join(before_url).strip() or None)
+    # Users often copy the value from an ``Authorization: Bearer ...`` example.
+    # Accept that form but store only the secret itself and never fold the word
+    # "Bearer" into the model name.
+    after_key = [token for token in after_key if token.lower() != "bearer"]
+    if api_key and api_key.lower().startswith("bearer "):
+        api_key = api_key[7:].strip()
     model = flags.get("model") or " ".join(after_key).strip()
 
     # Disambiguate a trailing token when it exactly matches the hostname-derived
@@ -739,18 +752,24 @@ def _name_from_url(url: str) -> str:
 
 
 def _normalize_base_url(url: str) -> str:
-    """Append /v1 when an OpenAI-compatible URL is given as a bare host.
+    """Return the base URL expected by the OpenAI-compatible client.
 
-    A path of just "/" or "" has no API version, so we add /v1. Any other
-    explicit path (e.g. /v1, /api) is left untouched.
+    Bare hosts gain ``/v1``. Full endpoint URLs copied from API examples lose
+    ``/chat/completions`` or ``/models`` so the client does not append the path
+    twice. Query strings and fragments are intentionally discarded from API
+    base URLs.
     """
-    from urllib.parse import urlparse
+    from urllib.parse import urlsplit, urlunsplit
 
-    url = url.rstrip("/")
-    parsed = urlparse(url)
-    if parsed.path in ("", "/"):
-        return f"{url}/v1"
-    return url
+    parsed = urlsplit(url.strip())
+    path = parsed.path.rstrip("/")
+    for endpoint in ("/chat/completions", "/models"):
+        if path.lower().endswith(endpoint):
+            path = path[: -len(endpoint)].rstrip("/")
+            break
+    if not path:
+        path = "/v1"
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
 
 
 async def _ai_toggle(
