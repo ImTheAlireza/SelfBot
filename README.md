@@ -193,7 +193,10 @@ of being silently truncated; the guarded maximum is 240,000 characters.
 `-brief` and `-detailed` remain shorthand for `-length short` and
 `-length detailed`. Text, Markdown, CSV, JSON, HTML, DOCX and text-based PDFs
 are extracted locally; unsupported binary documents are rejected instead of
-being decoded into garbage text.
+being decoded into garbage text. Conversation summaries label each source as
+`[M1]`, `[M2]`, etc., preserve UTC timestamps and speaker names, and ask the
+model to cite those markers. An italic footer reports source size, message/image
+counts, processing sections and the model route used.
 
 ### Messaging
 | Command | Description |
@@ -341,7 +344,7 @@ Manage them in chat: `plugin list`, `plugin load <path>`, `plugin reload <name>`
 ```bash
 pip install -e ".[dev,full]"
 
-pytest                      # 490 tests
+pytest                      # 491 tests
 pytest --cov=selfbot        # with coverage
 ruff check src tests        # lint
 mypy src/selfbot            # type check

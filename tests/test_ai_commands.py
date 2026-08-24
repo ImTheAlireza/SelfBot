@@ -371,6 +371,54 @@ async def test_summarize_conversation(bot) -> None:
     assert any("Conv summary" in r for r in event.replies)
     content = bot.http.calls[0]["json"]["messages"][-1]["content"]
     assert "one" in content and "three" in content
+    assert "[M1 | unknown time | Tester]" in content
+    assert "Cite important claims with their [M#]" in content
+    assert "3 messages" in event.replies[-1]
+    assert event.replies[-1].endswith("</i>")
+
+
+async def test_summarize_conversation_maps_visuals_to_message_references(bot) -> None:
+    from selfbot.plugins.ai import get_manager
+
+    await bot.db.add_provider(
+        "summary", "https://summary.example/v1", "sk-test", model="vision-model", is_default=True
+    )
+    manager = get_manager(type("C", (), {"bot": bot})())
+    bot.ai = manager
+    bot.http = _Http(answer="Grounded summary [M2]")
+
+    class Message:
+        def __init__(self, text: str, *, photo: bool = False) -> None:
+            self.raw_text = text
+            self.photo = object() if photo else None
+            self.document = None
+            self.sticker = None
+
+        async def get_sender(self) -> _Sender:
+            return _Sender()
+
+        async def download_media(self, *, file: Any) -> bytes:
+            return _png_bytes()
+
+    # Telegram iterates newest first; the summary source must become chronological.
+    messages = [Message("new image", photo=True), Message("older text")]
+
+    async def iter_messages(chat_id, limit):
+        for message in messages[:limit]:
+            yield message
+
+    bot.client.iter_messages = iter_messages
+    event = FakeEvent(raw_text="summarize 2")
+    await bot.registry.dispatch(bot, event, event.raw_text)
+
+    content = bot.http.calls[0]["json"]["messages"][-1]["content"]
+    assert isinstance(content, list)
+    text = content[0]["text"]
+    assert "[M1 | unknown time | Tester] older text" in text
+    assert "[M2 | unknown time | Tester] new image [attached image I1]" in text
+    assert content[1]["type"] == "image_url"
+    assert "2 messages" in event.replies[-1]
+    assert "1 image" in event.replies[-1]
 
 
 def test_extract_text_html_docx_and_reject_binary(tmp_path: Path) -> None:
