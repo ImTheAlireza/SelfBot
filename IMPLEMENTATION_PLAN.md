@@ -256,8 +256,10 @@ For each provider row show:
    messages from the current chat via `client.iter_messages`, formats them as
    `<sender>: <text>`, and asks the model for a bullet summary.
 
-Options: `-lang en|fa` (output language; auto-detected default), `-brief`
-(3 bullets) / `-detailed` (paragraphs). Reuses the `AIManager` with
+Options: `-lang auto|en|fa`, `-length short|medium|detailed`,
+`-style bullets|paragraph|actions|meeting`, and `-focus "topic"`; `-brief` and
+`-detailed` remain shorthand. Long sources use section summaries followed by a
+final synthesis instead of silent truncation. Reuses the `AIManager` with
 `history=False` and a dedicated summarization system prompt so it does not
 pollute conversational memory.
 
@@ -447,7 +449,7 @@ fallback**, with a deprecation note). `config.describe()` gains AI/health lines.
 | `gptmemory <on\|off\|clear\|turns\|status>` | AI | authorized | **new** |
 | `aistatus [test <name>]` | AI | sudo | **new** |
 | `gptmodel <list\|set\|clear\|current>` | AI | sudo | **new** |
-| `summarize [n] [-lang] [-brief\|-detailed]` | AI | authorized | **new** |
+| `summarize [n] [-lang] [-length] [-style] [-focus]` | AI | authorized | **new** |
 | `search ...filters` | Messaging | authorized | **new** |
 | `backup [-include-secrets]` | Admin | sudo | **new** |
 | `restore [-force]` | Admin | sudo | **new** |

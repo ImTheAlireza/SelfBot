@@ -725,6 +725,7 @@ class AIManager:
         model: str | None = None,
         system: str | None = None,
         images: Sequence[AIImage] | None = None,
+        max_tokens: int | None = None,
     ) -> str:
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system or SYSTEM_PROMPT}
@@ -751,7 +752,9 @@ class AIManager:
         if metrics is not None:
             metrics.incr("ai_requests")
         try:
-            answer = await self._complete_chain(messages, model=model)
+            answer = await self._complete_chain(
+                messages, model=model, max_tokens=max_tokens
+            )
         except Exception:
             if metrics is not None:
                 metrics.incr("ai_failures")
@@ -781,6 +784,7 @@ class AIManager:
         messages: list[dict[str, Any]],
         *,
         model: str | None = None,
+        max_tokens: int | None = None,
     ) -> str:
         providers = await self._ordered_providers()
         if not providers:
@@ -807,7 +811,10 @@ class AIManager:
                 use_model = ANYAPI_DEFAULT_MODEL
             try:
                 result = await self._call(
-                    provider, messages=messages, model=use_model
+                    provider,
+                    messages=messages,
+                    model=use_model,
+                    max_tokens=max_tokens,
                 )
             except ProviderStatusError as exc:
                 await self._record_failure(provider, exc, fallback=True)
@@ -849,6 +856,7 @@ class AIManager:
         *,
         messages: list[dict[str, Any]],
         model: str,
+        max_tokens: int | None,
     ) -> CompletionResult:
         if provider.kind in ("rapidapi", "rapidapi_backup"):
             if _messages_have_images(messages):
@@ -874,6 +882,7 @@ class AIManager:
             api_key=provider.api_key,
             base_url=provider.base_url,
             model=model,
+            max_tokens=max_tokens or 1000,
         )
 
     async def _in_cooldown(self, provider: AIProvider) -> bool:

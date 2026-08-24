@@ -11,6 +11,9 @@ from conftest import FakeEvent, FakeMessage
     ("text", "reply_required"),
     [
         ("summarize 5 --brief", False),
+        ("summarize 5 --length detailed", False),
+        ("summarize 5 --style meeting", False),
+        ('summarize 5 --focus "deadlines"', False),
         ("ai add https://api.example.com/v1 sk-test --model demo", False),
         ("backup --include-secrets", False),
         ("backup --file copy.json", False),

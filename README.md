@@ -158,7 +158,7 @@ preserved. Restart the corresponding process afterward to load the snapshot.
 |---|---|
 | `gpt <prompt>` | Ask the active model. Reply to text or an image to include it as context for a vision-capable model. Reply with `gpt edit [instruction]` to rewrite one of **your own** messages in place. |
 | `memory on\|off\|clear\|turns <n>\|status` | Per-chat conversation memory |
-| `summarize [n] [-lang en\|fa] [-brief\|-detailed]` | Summarize a replied message, image, static sticker, document, or last `n` messages |
+| `summarize [n] [-lang auto\|en\|fa] [-length short\|medium\|detailed] [-style bullets\|paragraph\|actions\|meeting] [-focus "topic"]` | Summarize replied content or recent messages |
 | `ai [add\|remove\|default\|enable\|disable\|test\|model\|status]` | 👑 Manage providers and the active model — the **only** place to do so |
 
 There is exactly **one** chat command (`gpt`) and **one** management command
@@ -188,6 +188,12 @@ separate Telegram quote, and the provider/model footer is always italic. Image
 replies and up to four visual messages in a conversation summary are sent using
 OpenAI-compatible multimodal `image_url` content. Static image stickers are
 converted to PNG/JPEG; TGS/video stickers are reported as unsupported.
+Long summary sources are processed section-by-section and synthesized instead
+of being silently truncated; the guarded maximum is 240,000 characters.
+`-brief` and `-detailed` remain shorthand for `-length short` and
+`-length detailed`. Text, Markdown, CSV, JSON, HTML, DOCX and text-based PDFs
+are extracted locally; unsupported binary documents are rejected instead of
+being decoded into garbage text.
 
 ### Messaging
 | Command | Description |
@@ -335,7 +341,7 @@ Manage them in chat: `plugin list`, `plugin load <path>`, `plugin reload <name>`
 ```bash
 pip install -e ".[dev,full]"
 
-pytest                      # 485 tests
+pytest                      # 490 tests
 pytest --cov=selfbot        # with coverage
 ruff check src tests        # lint
 mypy src/selfbot            # type check

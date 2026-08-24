@@ -265,6 +265,9 @@ async def test_summarize_requires_reply_or_count(bot) -> None:
 async def test_summarize_accepts_single_dash_flags(bot) -> None:
     from selfbot.plugins.ai import get_manager
 
+    await bot.db.add_provider(
+        "summary", "https://summary.example/v1", "sk-test", model="summary-model", is_default=True
+    )
     manager = get_manager(type("C", (), {"bot": bot})())
     bot.ai = manager
     bot.http = _Http(answer="خلاصه")
@@ -278,9 +281,68 @@ async def test_summarize_accepts_single_dash_flags(bot) -> None:
     await bot.registry.dispatch(bot, event, event.raw_text)
 
     assert any("خلاصه" in reply for reply in event.replies)
-    prompt = bot.http.calls[0]["json"]["messages"][-1]["content"]
+    request = bot.http.calls[0]["json"]
+    prompt = request["messages"][-1]["content"]
     assert "Respond in Persian" in prompt
-    assert "short bullet list" in prompt
+    assert "very short" in prompt
+    assert "clear bullet points" in prompt
+    assert request["max_tokens"] == 600
+
+
+async def test_summarize_actions_style_and_focus(bot) -> None:
+    from selfbot.plugins.ai import get_manager
+
+    await bot.db.add_provider(
+        "summary", "https://summary.example/v1", "sk-test", model="summary-model", is_default=True
+    )
+    manager = get_manager(type("C", (), {"bot": bot})())
+    bot.ai = manager
+    bot.http = _Http(answer="Action summary")
+    replied = _Replied(raw_text="Alice owns deployment by Friday.")
+    event = FakeEvent(
+        raw_text='summarize -style actions -focus "owners and deadlines" -length detailed',
+        is_reply=True,
+        reply_message=replied,
+    )
+
+    await bot.registry.dispatch(bot, event, event.raw_text)
+
+    request = bot.http.calls[0]["json"]
+    prompt = request["messages"][-1]["content"]
+    assert "action items, owners, deadlines" in prompt
+    assert "owners and deadlines" in prompt
+    assert request["max_tokens"] == 1800
+
+
+async def test_summarize_long_source_uses_map_reduce_without_truncating(bot) -> None:
+    from selfbot.plugins.ai import get_manager
+
+    await bot.db.add_provider(
+        "summary", "https://summary.example/v1", "sk-test", model="summary-model", is_default=True
+    )
+    manager = get_manager(type("C", (), {"bot": bot})())
+    bot.ai = manager
+    bot.http = _Http(answer="section notes")
+    source = ("A" * 25_000) + " FINAL-MARKER"
+    replied = _Replied(raw_text=source)
+    event = FakeEvent(
+        raw_text="summarize -length medium",
+        is_reply=True,
+        reply_message=replied,
+    )
+
+    await bot.registry.dispatch(bot, event, event.raw_text)
+
+    # 3 source chunks plus one synthesis request.
+    assert len(bot.http.calls) == 4
+    chunk_prompts = [
+        call["json"]["messages"][-1]["content"]
+        for call in bot.http.calls[:-1]
+    ]
+    assert any("FINAL-MARKER" in prompt for prompt in chunk_prompts)
+    final_prompt = bot.http.calls[-1]["json"]["messages"][-1]["content"]
+    assert "Section 1 notes" in final_prompt
+    assert bot.http.calls[-1]["json"]["max_tokens"] == 1100
 
 
 async def test_summarize_conversation(bot) -> None:
@@ -311,9 +373,30 @@ async def test_summarize_conversation(bot) -> None:
     assert "one" in content and "three" in content
 
 
-def test_extract_pdf_and_text(tmp_path: Path) -> None:
+def test_extract_text_html_docx_and_reject_binary(tmp_path: Path) -> None:
+    import zipfile
+
     from selfbot.plugins.ai import _extract_document_text
 
     txt = tmp_path / "note.txt"
     txt.write_text("hello world", encoding="utf-8")
     assert _extract_document_text(txt) == "hello world"
+
+    html = tmp_path / "page.html"
+    html.write_text("<h1>Title</h1><p>Useful text</p>", encoding="utf-8")
+    assert _extract_document_text(html) == "Title\nUseful text"
+
+    docx = tmp_path / "notes.docx"
+    document_xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        "<w:body><w:p><w:r><w:t>First paragraph</w:t></w:r></w:p>"
+        "<w:p><w:r><w:t>Second paragraph</w:t></w:r></w:p></w:body></w:document>"
+    )
+    with zipfile.ZipFile(docx, "w") as archive:
+        archive.writestr("word/document.xml", document_xml)
+    assert _extract_document_text(docx) == "First paragraph\nSecond paragraph"
+
+    binary = tmp_path / "archive.zip"
+    binary.write_bytes(b"\x00\xffnot text")
+    assert _extract_document_text(binary) == ""
