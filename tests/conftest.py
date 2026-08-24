@@ -12,6 +12,7 @@ import pytest
 from selfbot.config import (
     AIConfig,
     Config,
+    HealthConfig,
     SpamConfig,
     StickerConfig,
     SupervisorConfig,
@@ -19,6 +20,7 @@ from selfbot.config import (
 )
 from selfbot.db import Database
 from selfbot.registry import CommandRegistry, Context
+from selfbot.services.metrics import Metrics
 
 SUDO_ID = 4242
 
@@ -36,6 +38,7 @@ def config(tmp_path: Path) -> Config:
         ),
         spam=SpamConfig(delay=0.0, limit=10, cooldown=0.0),
         ai=AIConfig(rapidapi_key="test-rapidapi-key"),
+        health=HealthConfig(port=None),
         sudo_user_id=SUDO_ID,
         database_url=f"sqlite+aiosqlite:///{tmp_path / 'test.db'}",
         data_dir=tmp_path,
@@ -196,6 +199,10 @@ class FakeBot:
         self.confirm_result = True
         self.confirm_prompts: list[str] = []
         self.http = None
+        self.ai = None
+        self.metrics = Metrics()
+        self.metrics.attach(self)
+        self.plugins = None
         self._auto_reply_cache: dict[int, list[Any]] = {}
         self.auto_reply_cache_invalidated: list[int | None] = []
         self.reaction_cache_invalidated = False

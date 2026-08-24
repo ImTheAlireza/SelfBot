@@ -154,6 +154,23 @@ class CommandRegistry:
 
         return decorator
 
+    # -- unregister --------------------------------------------------------
+
+    def unregister(self, name: str) -> Command | None:
+        """Remove a command (and its aliases). Returns it, or None.
+
+        Used by the external plugin manager to unload or reload plugins.
+        Safe to call on an unknown name.
+        """
+        key = name.lower()
+        command = self._commands.pop(key, None)
+        if command is None:
+            return None
+        for alias in command.aliases:
+            self._commands.pop(alias.lower(), None)
+        self._by_name.pop(command.name, None)
+        return command
+
     # -- lookup ------------------------------------------------------------
 
     def get(self, name: str) -> Command | None:
@@ -219,13 +236,20 @@ class CommandRegistry:
             command=head.lower(),
         )
 
+        metrics = getattr(bot, "metrics", None)
         try:
             await self._invoke(command, ctx)
+            if metrics is not None:
+                metrics.incr("commands_run")
         except CommandError as exc:
+            if metrics is not None:
+                metrics.incr("commands_failed")
             await _safe_reply(ctx, exc.user_message())
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            if metrics is not None:
+                metrics.incr("commands_failed")
             logger.exception("Unhandled error in command %s", command.name)
             await _safe_reply(
                 ctx,

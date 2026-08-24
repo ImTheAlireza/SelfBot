@@ -15,6 +15,7 @@ from .errors import ConfigError
 __all__ = [
     "AIConfig",
     "Config",
+    "HealthConfig",
     "SpamConfig",
     "StickerConfig",
     "SupervisorConfig",
@@ -110,11 +111,15 @@ class AIConfig:
     bluesminds_key: str = ""
     bluesminds_base_url: str = BLUESMINDS_DEFAULT_BASE_URL
     bluesminds_model: str = ANYAPI_DEFAULT_MODEL
-
+    memory_turns: int = 10
+    memory_budget: int = 24000
+    cooldown_max: int = 900
 
     @property
     def enabled(self) -> bool:
-        return bool(self.anyapi_key or self.bluesminds_key or self.rapidapi_key)
+        return bool(
+            self.anyapi_key or self.bluesminds_key or self.rapidapi_key
+        )
 
     @property
     def provider(self) -> str:
@@ -126,12 +131,23 @@ class AIConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class HealthConfig:
+    bind: str = "127.0.0.1"
+    port: int | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return self.port is not None
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     telegram: TelegramConfig
     sticker: StickerConfig
     supervisor: SupervisorConfig
     spam: SpamConfig
     ai: AIConfig
+    health: HealthConfig
 
     sudo_user_id: int
     database_url: str
@@ -144,6 +160,7 @@ class Config:
     startup_notify: str
     max_file_size_mb: int
     temp_ttl_minutes: int
+    plugins_dir: Path | None = None
 
     # Populated lazily so tests can point them somewhere temporary.
     _dirs_created: bool = field(default=False, compare=False)
@@ -157,6 +174,14 @@ class Config:
         return self.data_dir / "downloads"
 
     @property
+    def plugins_path(self) -> Path:
+        return self.plugins_dir or (self.data_dir / "plugins")
+
+    @property
+    def secret_key_path(self) -> Path:
+        return self.data_dir / "secret.key"
+
+    @property
     def max_file_size_bytes(self) -> int:
         return self.max_file_size_mb * 1024 * 1024
 
@@ -164,6 +189,7 @@ class Config:
         """Create the data directories. Safe to call repeatedly."""
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.downloads_dir.mkdir(parents=True, exist_ok=True)
+        self.plugins_path.mkdir(parents=True, exist_ok=True)
 
     def describe(self) -> str:
         """Human-readable, secret-free summary for startup logs."""
@@ -173,7 +199,10 @@ class Config:
             f"sudo user    : {self.sudo_user_id}",
             f"prefix       : {self.command_prefix or '(none)'}",
             f"stickers     : {'enabled' if self.sticker.enabled else 'disabled'}",
-            f"ai: {self.ai.provider}",
+            f"ai           : {self.ai.provider}",
+            f"health       : "
+            f"{f'{self.health.bind}:{self.health.port}' if self.health.enabled else 'disabled'}",
+            f"plugins      : {self.plugins_path}",
             f"supervisor   : {'enabled' if self.supervisor.enabled else 'disabled'}",
             f"log channel  : {self.log_channel_id or '(none)'}",
         ]
@@ -268,6 +297,24 @@ def load_config(
         bluesminds_key=_env("BLUESMINDS_API_KEY"),
         bluesminds_base_url=_env("BLUESMINDS_BASE_URL") or BLUESMINDS_DEFAULT_BASE_URL,
         bluesminds_model=_env("BLUESMINDS_MODEL") or ANYAPI_DEFAULT_MODEL,
+        memory_turns=max(0, min(50, _env_int("AI_MEMORY_TURNS", 10) or 10)),
+        memory_budget=max(
+            1000, _env_int("AI_MEMORY_BUDGET", 24000) or 24000
+        ),
+        cooldown_max=max(0, _env_int("AI_COOLDOWN_MAX", 900) or 900),
+    )
+
+    health_port = _env_int("HEALTH_PORT")
+    health = HealthConfig(
+        bind=_env("HEALTH_BIND", "127.0.0.1") or "127.0.0.1",
+        port=health_port,
+    )
+
+    plugins_dir_raw = _env("PLUGINS_DIR")
+    plugins_dir = (
+        Path(plugins_dir_raw).expanduser().resolve()
+        if plugins_dir_raw
+        else None
     )
 
     return Config(
@@ -281,6 +328,7 @@ def load_config(
         supervisor=supervisor,
         spam=spam,
         ai=ai,
+        health=health,
         sudo_user_id=sudo_user_id,  # type: ignore[arg-type]
         database_url=database_url,
         data_dir=data_dir,
@@ -292,6 +340,7 @@ def load_config(
         startup_notify=_env("STARTUP_NOTIFY", "me") or "me",
         max_file_size_mb=_env_int("MAX_FILE_SIZE_MB", 512) or 512,
         temp_ttl_minutes=_env_int("TEMP_TTL_MINUTES", 60) or 60,
+        plugins_dir=plugins_dir,
     )
 
 

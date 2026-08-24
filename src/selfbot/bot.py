@@ -26,6 +26,9 @@ from .errors import ConfigError
 from .logging_setup import TelegramLogHandler
 from .registry import CommandRegistry
 from .registry import registry as global_registry
+from .security import SecretBox
+from .services.metrics import Metrics
+from .services.plugins import PluginManager
 from .utils.files import cleanup_old_files
 from .utils.http import close_client, get_client
 from .utils.text import TELEGRAM_LIMIT, chunk_text
@@ -33,6 +36,15 @@ from .utils.text import TELEGRAM_LIMIT, chunk_text
 logger = logging.getLogger(__name__)
 
 __all__ = ["SelfBot"]
+
+# Process-wide reference to the active bot's metrics. The HTTP client uses this
+# to record failures without taking a dependency on a bot instance at import
+# time. Set by SelfBot.__init__; reads are best-effort and tolerate absence.
+_live_metrics: Any = None
+
+
+def _current_metrics() -> Any:
+    return _live_metrics
 
 _REACTION_CACHE_TTL = 300.0
 _WELCOME_DEDUP_TTL = 300.0
@@ -53,6 +65,28 @@ class SelfBot:
         self.config = config
         self.registry = registry or global_registry
         self.db = db or Database(config.database_url)
+        # Encrypt API keys and other secrets stored in the database. If the
+        # cryptography package is unavailable we continue without encryption
+        # rather than refusing to start.
+        secrets = SecretBox(config.secret_key_path)
+        if secrets.is_available():
+            self.db.attach_secrets(secrets)
+            self.secrets: SecretBox | None = secrets
+        else:
+            logger.warning(
+                "cryptography is not installed; AI API keys in the database "
+                "will be stored unencrypted. `pip install cryptography` to enable."
+            )
+            self.secrets = None
+        # AI, metrics and plugin managers. Metrics exists from construction so
+        # hot paths can always increment counters; the others are populated in
+        # start() and declared here for type-checkers.
+        self.metrics = Metrics()
+        self.metrics.attach(self)
+        global _live_metrics
+        _live_metrics = self.metrics
+        self.ai: Any = None
+        self.plugins: Any = None
         self.started_at = time.monotonic()
 
         config.ensure_dirs()
@@ -85,6 +119,7 @@ class SelfBot:
         self._telegram_log_handler: TelegramLogHandler | None = None
         self._background: set[asyncio.Task[Any]] = set()
         self._shutting_down = False
+        self._health_runner: Any = None
 
     # -- properties --------------------------------------------------------
 
@@ -123,6 +158,12 @@ class SelfBot:
         await self.db.connect()
         await self.db.ensure_sudo(self.config.sudo_user_id)
 
+        # First-run: copy any legacy environment AI keys into the database so
+        # operators can move to DB-managed providers without re-entering them.
+        from .services.ai import seed_providers_from_env
+
+        await seed_providers_from_env(self.db, self.config.ai)
+
         self._register_events()
 
         await self._sign_in()
@@ -142,6 +183,23 @@ class SelfBot:
             )
 
         self._attach_telegram_logging()
+        self.metrics.start_loop_probe()
+
+        from .plugins.health import start_health_server
+
+        self._health_runner = await start_health_server(self)
+
+        # External plugins (DATA_DIR/plugins) load after the built-ins so they
+        # can override or supplement core commands.
+        self.plugins = PluginManager(self, self.config.plugins_path)
+        external = await self.plugins.load_all()
+        if external:
+            logger.info(
+                "Loaded %d external plugin(s): %s",
+                len(external),
+                ", ".join(p.name for p in external),
+            )
+
         restored, expired = await self._restore_timers()
         self._spawn(self._janitor(), name="janitor")
         self._spawn(self._welcome_watcher(), name="welcome-watcher")
@@ -273,6 +331,16 @@ class SelfBot:
             await self._telegram_log_handler.stop()
             logging.getLogger().removeHandler(self._telegram_log_handler)
 
+        if self.plugins is not None:
+            try:
+                await self.plugins.shutdown()
+            except Exception:
+                logger.debug("Plugin shutdown error", exc_info=True)
+        await self.metrics.stop()
+        if self._health_runner is not None:
+            from .plugins.health import stop_health_server
+
+            await stop_health_server(self._health_runner)
         await close_client()
         await self.db.close()
 
@@ -353,6 +421,7 @@ class SelfBot:
             logger.debug("Reaction on edited message failed", exc_info=True)
 
     async def _handle_message(self, event: Any) -> None:
+        self.metrics.incr("messages_seen")
         await self._maybe_react(event)
 
         # Real-time collision detection for active challenge sessions

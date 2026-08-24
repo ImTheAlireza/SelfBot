@@ -50,15 +50,15 @@ async def cmd_qr(ctx: Context) -> None:
     index = 0
     while index < len(args):
         token = args[index].lower()
-        if token in {"--size", "-s"} and index + 1 < len(args):
+        if token in {"-size", "-s"} and index + 1 < len(args):
             if not args[index + 1].isdigit():
-                raise ValidationError("`--size` needs a number.")
+                raise ValidationError("`-size` needs a number.")
             size = int(args[index + 1])
             index += 2
-        elif token in {"--fg", "--foreground"} and index + 1 < len(args):
+        elif token in {"-fg", "-foreground"} and index + 1 < len(args):
             fg = args[index + 1].lower()
             index += 2
-        elif token in {"--bg", "--background"} and index + 1 < len(args):
+        elif token in {"-bg", "-background"} and index + 1 < len(args):
             bg = args[index + 1].lower()
             index += 2
         else:
@@ -70,7 +70,7 @@ async def cmd_qr(ctx: Context) -> None:
         raise ValidationError("Nothing to encode.")
     if not 1 <= size <= 40:
         raise ValidationError("Size must be between 1 and 40.")
-    for name, value in (("--fg", fg), ("--bg", bg)):
+    for name, value in (("-fg", fg), ("-bg", bg)):
         if value not in COLOURS:
             raise ValidationError(
                 f"Unknown colour for {name}: `{value}`.\n"

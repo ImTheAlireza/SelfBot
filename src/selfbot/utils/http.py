@@ -86,6 +86,7 @@ class HttpClient:
                     method, url, timeout=request_timeout, **kwargs
                 )
                 await response.read()  # buffer before the context closes
+                self._count("http_requests")
 
                 if response.status in _RETRY_STATUSES and attempt < attempts:
                     delay = self._retry_delay(response, attempt)
@@ -95,17 +96,21 @@ class HttpClient:
                     )
                     await asyncio.sleep(delay)
                     continue
+                if response.status >= 500 or response.status in _RETRY_STATUSES:
+                    self._record_failure(url, f"HTTP {response.status}", response.status)
                 return response
 
             except asyncio.TimeoutError as exc:
                 last_error = exc
                 if attempt >= attempts:
+                    self._record_failure(url, "timeout", None)
                     raise ProviderError(
                         f"Request to {_host(url)} timed out after {timeout or self._timeout:.0f}s."
                     ) from exc
             except aiohttp.ClientError as exc:
                 last_error = exc
                 if attempt >= attempts:
+                    self._record_failure(url, type(exc).__name__, None)
                     raise ProviderError(
                         f"Could not reach {_host(url)}: {type(exc).__name__}"
                     ) from exc
@@ -113,6 +118,30 @@ class HttpClient:
             await asyncio.sleep(self._backoff * (2**attempt))
 
         raise ProviderError(f"Request to {_host(url)} failed: {last_error}")
+
+    @staticmethod
+    def _count(name: str) -> None:
+        """Best-effort counter increment against the process-wide metrics."""
+        try:
+            from selfbot.bot import _current_metrics  # type: ignore[attr-defined]
+
+            metrics = _current_metrics()
+            if metrics is not None:
+                metrics.incr(name)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _record_failure(url: str, message: str, status: int | None) -> None:
+        try:
+            from selfbot.bot import _current_metrics  # type: ignore[attr-defined]
+
+            metrics = _current_metrics()
+            if metrics is not None:
+                metrics.record_failure(_host(url), message, status=status)
+                metrics.incr("http_failures")
+        except Exception:
+            pass
 
     def _retry_delay(self, response: aiohttp.ClientResponse, attempt: int) -> float:
         header = response.headers.get("Retry-After")

@@ -628,15 +628,15 @@ async def test_split_rejects_malformed_argument(bot, registry):
 
 @pytest.mark.asyncio
 async def test_qr_rejects_unknown_colour(bot, registry):
-    event = FakeEvent(raw_text="qr hello --fg chartreuse")
-    await registry.dispatch(bot, event, "qr hello --fg chartreuse")
+    event = FakeEvent(raw_text="qr hello -fg chartreuse")
+    await registry.dispatch(bot, event, "qr hello -fg chartreuse")
     assert any("Unknown colour" in r for r in event.replies)
 
 
 @pytest.mark.asyncio
 async def test_qr_rejects_out_of_range_size(bot, registry):
-    event = FakeEvent(raw_text="qr hello --size 99")
-    await registry.dispatch(bot, event, "qr hello --size 99")
+    event = FakeEvent(raw_text="qr hello -size 99")
+    await registry.dispatch(bot, event, "qr hello -size 99")
     assert any("between 1 and 40" in r for r in event.replies)
 
 

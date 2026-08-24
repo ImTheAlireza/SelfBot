@@ -110,12 +110,34 @@ async def cmd_status(ctx: Context) -> None:
     active_timers = len(bot.timer_tasks)
     queued = sum(len(v) for v in bot.zip_queue.values())
 
+    ai_line = ""
+    try:
+        from .ai import get_manager
+
+        manager = get_manager(ctx)
+        statuses = await manager.status()
+        if statuses:
+            available = sum(1 for s in statuses if s.available)
+            cooling = sum(1 for s in statuses if s.cooldown_remaining > 0)
+            default = next(
+                (s.provider.name for s in statuses if s.provider.is_default), None
+            )
+            parts = [f"{available}/{len(statuses)} up"]
+            if default:
+                parts.append(f"default `{default}`")
+            if cooling:
+                parts.append(f"{cooling} cooling")
+            ai_line = f"AI providers: `{ ' · '.join(parts) }`\n"
+    except Exception:
+        logger.debug("Could not build AI status line", exc_info=True)
+
     await ctx.reply(
         f"📊 **SelfBot Status**\n\n"
         f"State: {'🟢 active' if bot.active else '🔴 paused'}\n"
         f"Uptime: `{format_duration(bot.uptime)}`\n"
         f"Commands: `{len(bot.registry)}`\n"
         f"Database: `{bot.db.backend}`\n"
+        f"{ai_line}"
         f"Active timers: `{active_timers}`\n"
         f"Queued files: `{queued}`\n"
         f"Python: `{platform.python_version()}` on `{platform.system()}`\n"
