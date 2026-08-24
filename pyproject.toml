@@ -28,6 +28,10 @@ dependencies = [
     "aiohttp>=3.9",
     "aiosqlite>=0.19",
     "cryptography>=42.0",
+    # Required by Persian/Arabic image rendering. Keeping these in the base
+    # install prevents `stick` from silently drawing RTL text backwards.
+    "arabic-reshaper>=3.0",
+    "python-bidi>=0.4.2",
 ]
 
 [project.optional-dependencies]
@@ -40,8 +44,6 @@ full = [
     "pyzipper>=0.3.6",
     "mutagen>=1.47",
     "reportlab>=4.0",
-    "arabic-reshaper>=3.0",
-    "python-bidi>=0.4.2",
 ]
 mysql = ["aiomysql>=0.2"]
 qr = ["pyzbar>=0.1.9"]

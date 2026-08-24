@@ -750,6 +750,26 @@ def test_sticker_rendering_handles_rtl(tmp_path: Path):
     assert output.is_file()
 
 
+def test_sticker_rtl_preparation_avoids_double_bidi_processing():
+    from selfbot.plugins.stickers import _prepare_sticker_text
+    from selfbot.utils.text import shape_rtl
+
+    logical = "سلام دنیا"
+
+    # libraqm expects logical text and handles shaping/bidi itself.
+    native_text, native_direction = _prepare_sticker_text(logical, native_rtl=True)
+    assert native_text == logical
+    assert native_direction == "rtl"
+
+    # Pillow builds without libraqm need pre-shaped visual-order glyphs.
+    fallback_text, fallback_direction = _prepare_sticker_text(
+        logical, native_rtl=False
+    )
+    assert fallback_text == shape_rtl(logical)
+    assert fallback_text != logical
+    assert fallback_direction is None
+
+
 def test_sticker_rendering_handles_long_text(tmp_path: Path):
     from selfbot.plugins.stickers import render_sticker
 
@@ -764,6 +784,20 @@ def test_sticker_rendering_scales_short_text_boldly(tmp_path: Path):
     output = tmp_path / "short.webp"
     render_sticker("سلام", output)
     assert output.is_file()
+
+
+@pytest.mark.asyncio
+async def test_stick_replies_to_the_commands_reply_target(bot, registry):
+    replied = FakeMessage(id=321, text="original message")
+    event = FakeEvent(
+        raw_text="stick سلام", is_reply=True, reply_message=replied
+    )
+
+    await registry.dispatch(bot, event, event.raw_text)
+
+    assert event.deleted
+    assert len(bot.client.sent_files) == 1
+    assert bot.client.sent_files[0]["reply_to"] == replied.id
 
 
 @pytest.mark.asyncio

@@ -10,7 +10,7 @@ from typing import Any
 from ..errors import FeatureDisabledError, UsageError, ValidationError
 from ..registry import Context, command
 from ..utils.files import temp_workspace
-from ..utils.text import shape_rtl, truncate
+from ..utils.text import has_rtl, shape_rtl, truncate
 
 logger = logging.getLogger(__name__)
 
@@ -38,11 +38,36 @@ def _font_path() -> Path | None:
     return next((p for p in candidates if p.is_file()), None)
 
 
+def _prepare_sticker_text(text: str, *, native_rtl: bool) -> tuple[str, str | None]:
+    """Prepare a line without applying the bidi algorithm twice.
+
+    Pillow builds with libraqm shape and order RTL text themselves. Other builds
+    need ``arabic-reshaper`` and ``python-bidi`` to produce visual-order glyphs.
+    Feeding pre-shaped visual text to libraqm makes it reorder the line again.
+    """
+    if native_rtl and has_rtl(text):
+        return text, "rtl"
+    return shape_rtl(text), None
+
+
+def _text_length(
+    text: str,
+    draw: Any,
+    font: Any,
+    *,
+    native_rtl: bool,
+) -> float:
+    rendered, direction = _prepare_sticker_text(text, native_rtl=native_rtl)
+    return float(draw.textlength(rendered, font=font, direction=direction))
+
+
 def _wrap_words(
     text: str,
     draw: Any,
     font: Any,
     max_width: float,
+    *,
+    native_rtl: bool,
 ) -> tuple[list[str], bool]:
     """Wrap text to fit within max_width using actual font measurements."""
     lines: list[str] = []
@@ -58,18 +83,20 @@ def _wrap_words(
         current = ""
         for word in words:
             candidate = f"{current} {word}".strip()
-            if draw.textlength(shape_rtl(candidate), font=font) <= max_width:
+            if _text_length(candidate, draw, font, native_rtl=native_rtl) <= max_width:
                 current = candidate
             else:
                 if current:
                     lines.append(current)
-                if draw.textlength(shape_rtl(word), font=font) <= max_width:
+                if _text_length(word, draw, font, native_rtl=native_rtl) <= max_width:
                     current = word
                 else:
                     has_broken_word = True
                     chunk = ""
                     for ch in word:
-                        if draw.textlength(shape_rtl(chunk + ch), font=font) <= max_width:
+                        if _text_length(
+                            chunk + ch, draw, font, native_rtl=native_rtl
+                        ) <= max_width:
                             chunk += ch
                         else:
                             if chunk:
@@ -84,7 +111,7 @@ def _wrap_words(
 
 def render_sticker(text: str, output: Path, watermark: str = "") -> Path:
     """Draw text onto a 512×512 WEBP, auto-fitting the font size."""
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageDraw, ImageFont, features
 
     image = Image.new("RGBA", (CANVAS, CANVAS), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
@@ -93,6 +120,15 @@ def render_sticker(text: str, output: Path, watermark: str = "") -> Path:
     font_str = str(font_file) if font_file else None
     max_width = CANVAS - 2 * PADDING
     max_height = CANVAS - 2 * PADDING - (44 if watermark else 0)
+    native_rtl = bool(features.check_feature("raqm"))
+    layout_engine = (
+        ImageFont.Layout.RAQM if native_rtl else ImageFont.Layout.BASIC
+    )
+
+    def load_font(size: int) -> Any:
+        if font_str is None:
+            raise OSError("No sticker font found")
+        return ImageFont.truetype(font_str, size, layout_engine=layout_engine)
 
     chosen_font: Any = None
     chosen_lines: list[str] = []
@@ -103,19 +139,27 @@ def render_sticker(text: str, output: Path, watermark: str = "") -> Path:
         while low <= high:
             mid = (low + high) // 2
             try:
-                font = ImageFont.truetype(font_str, mid)
+                font = load_font(mid)
             except OSError:
                 break
 
-            lines, broken_word = _wrap_words(text, draw, font, max_width)
-            shaped = [shape_rtl(line) if line else "" for line in lines]
-            widest = max((draw.textlength(line, font=font) for line in shaped), default=0)
+            lines, broken_word = _wrap_words(
+                text, draw, font, max_width, native_rtl=native_rtl
+            )
+            widest = max(
+                (
+                    _text_length(line, draw, font, native_rtl=native_rtl)
+                    for line in lines
+                    if line
+                ),
+                default=0,
+            )
             line_height = mid * 1.35
-            total_height = line_height * len(shaped)
+            total_height = line_height * len(lines)
 
             if not broken_word and widest <= max_width and total_height <= max_height:
                 chosen_font = font
-                chosen_lines = shaped
+                chosen_lines = lines
                 low = mid + 1
             else:
                 high = mid - 1
@@ -123,7 +167,7 @@ def render_sticker(text: str, output: Path, watermark: str = "") -> Path:
     if chosen_font is None:
         if font_str:
             try:
-                chosen_font = ImageFont.truetype(font_str, min_size)
+                chosen_font = load_font(min_size)
             except OSError:
                 logger.warning("Sticker font %r exists but cannot be loaded", font_str)
                 chosen_font = None
@@ -135,8 +179,9 @@ def render_sticker(text: str, output: Path, watermark: str = "") -> Path:
                 "No usable font for stickers. Restore assets/fonts/ "
                 '(Vazirmatn-Regular.ttf) or reinstall with `pip install -e ".[full]"`.'
             )
-        lines, _ = _wrap_words(text, draw, chosen_font, max_width)
-        chosen_lines = [shape_rtl(line) if line else "" for line in lines]
+        chosen_lines, _ = _wrap_words(
+            text, draw, chosen_font, max_width, native_rtl=native_rtl
+        )
 
     size = getattr(chosen_font, "size", 18)
     line_height = size * 1.35
@@ -145,38 +190,46 @@ def render_sticker(text: str, output: Path, watermark: str = "") -> Path:
 
     for line in chosen_lines:
         if line:
-            width = draw.textlength(line, font=chosen_font)
+            rendered, direction = _prepare_sticker_text(
+                line, native_rtl=native_rtl
+            )
+            width = draw.textlength(
+                rendered, font=chosen_font, direction=direction
+            )
             x = (CANVAS - width) / 2
             # Outline keeps the text readable on any chat background.
             stroke_width = max(2, int(size / 16))
             draw.text(
                 (x, y),
-                line,
+                rendered,
                 font=chosen_font,
                 fill=(255, 255, 255, 255),
                 stroke_width=stroke_width,
                 stroke_fill=(0, 0, 0, 255),
+                direction=direction,
             )
         y += line_height
 
     if watermark:
         wm_size = max(16, min(26, int(size * 0.4)))
         try:
-            wm_font = (
-                ImageFont.truetype(font_str, wm_size)
-                if font_str
-                else ImageFont.load_default()
-            )
+            wm_font = load_font(wm_size) if font_str else ImageFont.load_default()
         except OSError:
             wm_font = ImageFont.load_default()
-        wm_width = draw.textlength(watermark, font=wm_font)
+        rendered_wm, wm_direction = _prepare_sticker_text(
+            watermark, native_rtl=native_rtl
+        )
+        wm_width = draw.textlength(
+            rendered_wm, font=wm_font, direction=wm_direction
+        )
         draw.text(
             ((CANVAS - wm_width) / 2, CANVAS - 44),
-            watermark,
+            rendered_wm,
             font=wm_font,
             fill=(170, 170, 170, 220),
             stroke_width=2,
             stroke_fill=(0, 0, 0, 200),
+            direction=wm_direction,
         )
 
     image.save(output, "WEBP", quality=95, lossless=True)
@@ -203,6 +256,13 @@ async def cmd_stick(ctx: Context) -> None:
     if len(raw) > 300:
         raise ValidationError("Text is too long for a sticker (max 300 characters).")
 
+    # Reply to the command's target, not to the command message that is deleted
+    # below, so the generated sticker stays attached to the intended message.
+    reply_to = None
+    if ctx.event.is_reply:
+        replied = await ctx.get_reply_message()
+        reply_to = getattr(replied, "id", None)
+
     with temp_workspace(parent=ctx.config.downloads_dir) as workspace:
         webp = workspace / "sticker.webp"
         await asyncio.to_thread(
@@ -217,6 +277,7 @@ async def cmd_stick(ctx: Context) -> None:
             attributes=[
                 DocumentAttributeSticker(alt="🖤", stickerset=InputStickerSetEmpty())
             ],
+            reply_to=reply_to,
         )
 
         # Delete the command message so only the sticker remains.
