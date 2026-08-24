@@ -20,7 +20,7 @@
 
 ## What it does
 
-57 commands across AI, file manipulation, timers, stickers, QR codes, weather,
+58 commands across AI, file manipulation, timers, stickers, QR codes, weather,
 dictionaries, search, backups and chat automation — all driven from your own
 Telegram account by typing commands into any chat.
 
@@ -94,6 +94,7 @@ Telegram, storage, logging, and process settings are environment-driven. See
 | `ANYAPI_KEY` / `BLUESMINDS_API_KEY` / `RAPIDAPI_KEY` | | — | AI keys seeded into the DB on first run; managed afterward via `ai` |
 | `HEALTH_PORT` / `HEALTH_BIND` | | disabled / `127.0.0.1` | Enable the `/healthz` HTTP endpoint |
 | `PLUGINS_DIR` | | `DATA_DIR/plugins` | Directory for external plugins |
+| `PROJECT_UPDATE_DIR` | | `/home/selfnit4/self/public/Selfbot` | Deployment replaced by the owner-only `getcode` command |
 | `SUPERVISOR_PROCESS` | | `selfbot` | Enables supervisor-backed status and logs |
 | `MAX_FILE_SIZE_MB` | | `512` | Ceiling on downloads and uploads |
 
@@ -125,11 +126,19 @@ Commands are typed as plain messages from your own account. Set
 | `status` | Uptime and runtime counters |
 | `health [metrics]` | 👑 Tasks, memory, DB, AI and recent API failures |
 | `self on\|off\|restart\|status\|logs\|diag` | 👑 Process control and supervisor troubleshooting |
+| `getcode <GitHub branch URL>` | 👑 Validate and overwrite deployed project code while preserving runtime state |
 | `plugin list\|load\|reload\|unload\|enable\|disable\|install\|path` | 👑 Manage external plugins |
 
 `self restart` directly replaces the current Python process while preserving
 its PID and environment. It deliberately does not call `supervisorctl restart`,
 which can deadlock when invoked by the process being restarted.
+
+`getcode` accepts only an HTTPS GitHub `/tree/<branch>` URL and asks for an
+in-chat confirmation. It downloads into a sibling staging directory, validates
+project structure, size, symlinks and Python syntax, then transactionally
+replaces all code under `PROJECT_UPDATE_DIR`. Stale code is removed; `.env`,
+`data`, virtualenvs, session files and logs are preserved. Run `self restart`
+afterward to load the new snapshot.
 
 ### Admin 👑
 | Command | Description |
@@ -312,7 +321,7 @@ Manage them in chat: `plugin list`, `plugin load <path>`, `plugin reload <name>`
 ```bash
 pip install -e ".[dev,full]"
 
-pytest                      # 441 tests
+pytest                      # 454 tests
 pytest --cov=selfbot        # with coverage
 ruff check src tests        # lint
 mypy src/selfbot            # type check

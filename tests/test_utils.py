@@ -204,6 +204,7 @@ def test_load_config_reads_env_file(monkeypatch, tmp_path):
         "export SUDO_USER_ID=999\n"
         "AI_COOLDOWN_SECONDS=10\n"
         f"DATA_DIR={tmp_path}\n"
+        f"PROJECT_UPDATE_DIR={tmp_path / 'deploy'}\n"
     )
 
     config = load_config(env_file=env)
@@ -211,6 +212,7 @@ def test_load_config_reads_env_file(monkeypatch, tmp_path):
     assert config.telegram.api_hash == "abcdef"
     assert config.sudo_user_id == 999
     assert config.ai.cooldown_seconds == 10
+    assert config.project_update_dir == tmp_path / "deploy"
 
 
 def test_config_describe_hides_secrets(config):
