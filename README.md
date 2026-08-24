@@ -165,7 +165,8 @@ Providers and API keys are stored **in the database** (encrypted at rest),
 not in `.env`; the `ai add` message containing the plaintext key is deleted
 automatically. Both ordinary OpenAI JSON responses and streamed SSE deltas are
 supported. A copied full endpoint such as `/v1/chat/completions` is normalized
-to its base URL automatically. Keys still present in `ANYAPI_KEY` /
+to its base URL automatically. GPT response footers distinguish the requested
+model from a different model identifier reported by the API. Keys still present in `ANYAPI_KEY` /
 `BLUESMINDS_API_KEY` / `RAPIDAPI_KEY` are seeded automatically on first start.
 When a provider returns a quota/rate-limit error it is temporarily skipped with
 exponential back-off; `ai` shows who is cooling down.

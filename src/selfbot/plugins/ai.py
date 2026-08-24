@@ -131,13 +131,17 @@ async def cmd_gpt(ctx: Context) -> None:
         )
         used_provider = getattr(manager, "_last_provider", "") or ""
         used_model = getattr(manager, "_last_model", "") or ""
+        reported_model = getattr(manager, "_last_reported_model", "") or ""
     finally:
         await _delete_status(status)
 
     footer = ""
     if used_provider:
         shown_model = used_model or "(default)"
-        footer = f"\n\n_— via {used_provider} · `{shown_model}`_"
+        footer = f"\n\n_— via {used_provider} · requested `{shown_model}`"
+        if reported_model and reported_model.casefold() != shown_model.casefold():
+            footer += f" · API reported `{reported_model}`"
+        footer += "_"
     await ctx.reply(answer + footer)
 
 

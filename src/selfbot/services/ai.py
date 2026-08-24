@@ -39,6 +39,7 @@ __all__ = [
     "RAPIDAPI_MODEL",
     "SYSTEM_PROMPT",
     "AIManager",
+    "CompletionResult",
     "ProviderStatus",
     "extract_stream_answer",
     "seed_providers_from_env",
@@ -75,6 +76,14 @@ class ProviderStatusError(ProviderError):
         self.status = status
 
 
+@dataclass(frozen=True, slots=True)
+class CompletionResult:
+    """A completion plus the model identifier reported by the API response."""
+
+    text: str
+    reported_model: str = ""
+
+
 @dataclass(slots=True)
 class ProviderStatus:
     provider: AIProvider
@@ -97,7 +106,7 @@ async def openai_completion(
     timeout: float = 120.0,
     temperature: float = 0.7,
     max_tokens: int = 1000,
-) -> str:
+) -> CompletionResult:
     """Request an OpenAI-compatible completion, accepting JSON or SSE.
 
     Streaming is requested because some compatible gateways document that as
@@ -132,7 +141,7 @@ async def openai_completion(
             retries=0,
         )
         try:
-            return await _openai_response_text(response)
+            return await _openai_response_result(response)
         except ProviderStatusError as exc:
             # Retry only when the server rejected streaming before generating a
             # completion. Authentication, quota and upstream errors must not be
@@ -145,7 +154,7 @@ async def openai_completion(
     raise ProviderError("AI provider did not return a completion.")
 
 
-async def _openai_response_text(response: Any) -> str:
+async def _openai_response_result(response: Any) -> CompletionResult:
     """Decode one OpenAI response without trusting its Content-Type header."""
     raw = ""
     try:
@@ -173,11 +182,14 @@ async def _openai_response_text(response: Any) -> str:
     # Some test doubles and permissive gateways return the SSE body as a JSON
     # string. Detect it before treating it as an ordinary plain-text answer.
     if isinstance(payload, str) and _looks_like_event_stream(payload):
-        return extract_stream_answer(payload)
+        return _extract_stream_result(payload)
     if payload is not None:
-        return extract_answer(payload, "AI provider")
+        return CompletionResult(
+            extract_answer(payload, "AI provider"),
+            _response_model(payload),
+        )
     if _looks_like_event_stream(raw):
-        return extract_stream_answer(raw)
+        return _extract_stream_result(raw)
 
     preview = raw.strip()[:160]
     detail = f": {preview}" if preview else ""
@@ -196,6 +208,13 @@ def _json_body(raw: str) -> Any | None:
         return None
 
 
+def _response_model(payload: Any) -> str:
+    if not isinstance(payload, Mapping):
+        return ""
+    model = payload.get("model")
+    return model.strip() if isinstance(model, str) else ""
+
+
 def _looks_like_event_stream(raw: str) -> bool:
     stripped = raw.lstrip("\ufeff \t\r\n")
     return stripped.startswith(("data:", "event:", ":"))
@@ -212,7 +231,14 @@ def _stream_parameter_rejected(exc: ProviderStatusError) -> bool:
 
 
 def extract_stream_answer(raw: str, provider: str = "AI provider") -> str:
-    """Join text deltas from an OpenAI-compatible SSE response.
+    """Join and return text deltas from an OpenAI-compatible SSE response."""
+    return _extract_stream_result(raw, provider).text
+
+
+def _extract_stream_result(
+    raw: str, provider: str = "AI provider"
+) -> CompletionResult:
+    """Decode SSE text while retaining its API-reported model identifier.
 
     Handles standard ``data: {...}`` server-sent events, multi-line SSE data,
     comment/metadata fields and newline-delimited JSON used by a few gateways.
@@ -221,8 +247,10 @@ def extract_stream_answer(raw: str, provider: str = "AI provider") -> str:
     """
     pieces: list[str] = []
     data_lines: list[str] = []
+    reported_model = ""
 
     def consume(data: str) -> bool:
+        nonlocal reported_model
         data = data.strip("\r\n")
         if not data:
             return False
@@ -238,6 +266,7 @@ def extract_stream_answer(raw: str, provider: str = "AI provider") -> str:
             return False
         if chunk.get("error"):
             raise ProviderError(format_provider_error(chunk, 400, provider))
+        reported_model = _response_model(chunk) or reported_model
         piece = _stream_chunk_text(chunk)
         if piece:
             pieces.append(piece)
@@ -269,7 +298,7 @@ def extract_stream_answer(raw: str, provider: str = "AI provider") -> str:
     answer = "".join(pieces).strip()
     if not answer:
         raise ProviderError(f"{provider} returned an empty streamed completion.")
-    return answer
+    return CompletionResult(answer, reported_model)
 
 
 def _stream_chunk_text(chunk: Mapping[str, Any]) -> str:
@@ -742,6 +771,7 @@ class AIManager:
         errors: list[str] = []
         self._last_provider = ""
         self._last_model = ""
+        self._last_reported_model = ""
 
         for provider in providers:
             if not provider.api_key:
@@ -751,8 +781,10 @@ class AIManager:
                 continue
 
             use_model = model or provider.model or ""
+            if not use_model and provider.kind == "openai":
+                use_model = ANYAPI_DEFAULT_MODEL
             try:
-                answer = await self._call(
+                result = await self._call(
                     provider, messages=messages, model=use_model
                 )
             except ProviderStatusError as exc:
@@ -770,7 +802,8 @@ class AIManager:
             self._consecutive_failures.pop(provider.name, None)
             self._last_provider = provider.name
             self._last_model = use_model
-            return answer
+            self._last_reported_model = result.reported_model
+            return result.text
 
         detail = "; ".join(errors[-3:]) if errors else "no providers available"
         raise ProviderError(f"All AI providers are unavailable ({detail}).")
@@ -795,20 +828,22 @@ class AIManager:
         *,
         messages: list[dict[str, str]],
         model: str,
-    ) -> str:
+    ) -> CompletionResult:
         if provider.kind in ("rapidapi", "rapidapi_backup"):
             prompt = next(
                 (m["content"] for m in reversed(messages) if m["role"] == "user"),
                 "",
             )
-            return await rapidapi_completion(
+            answer = await rapidapi_completion(
                 self.http, prompt=prompt, api_key=provider.api_key
             )
-        if not model:
-            model = ANYAPI_DEFAULT_MODEL
+            return CompletionResult(answer)
+        routed_messages = _with_route_context(
+            messages, provider=provider.name, model=model
+        )
         return await openai_completion(
             self.http,
-            messages=messages,
+            messages=routed_messages,
             api_key=provider.api_key,
             base_url=provider.base_url,
             model=model,
@@ -949,6 +984,35 @@ class AIManager:
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
+
+
+def _with_route_context(
+    messages: Sequence[Mapping[str, str]],
+    *,
+    provider: str,
+    model: str,
+) -> list[dict[str, str]]:
+    """Tell the model which API route was requested without claiming proof.
+
+    Language models cannot reliably introspect their own deployment identity.
+    This runtime context makes identity answers report the selected API model
+    instead of guessing a vendor from training-time persona data.
+    """
+    routed = [dict(message) for message in messages]
+    context = (
+        "\n\nRuntime routing context: this application requested model identifier "
+        f"'{model}' through provider '{provider}'. You cannot independently "
+        "inspect the provider's underlying deployment. If asked which model "
+        "you are, report this requested API identifier and do not guess a "
+        "different vendor or model identity."
+    )
+    for message in routed:
+        if message.get("role") == "system":
+            message["content"] = message.get("content", "") + context
+            break
+    else:
+        routed.insert(0, {"role": "system", "content": context.lstrip()})
+    return routed
 
 
 def _dt_from_timestamp(ts: float) -> Any:

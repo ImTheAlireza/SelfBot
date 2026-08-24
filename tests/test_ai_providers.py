@@ -93,6 +93,9 @@ async def test_chat_uses_default_openai_provider(db) -> None:
     assert call["headers"]["Authorization"] == "Bearer sk-test"
     assert call["headers"]["Accept"] == "text/event-stream, application/json"
     assert call["json"]["model"] == "m1"
+    system = call["json"]["messages"][0]["content"]
+    assert "requested model identifier 'm1'" in system
+    assert "provider 'anyapi'" in system
     assert call["json"]["stream"] is True
     assert call["json"]["temperature"] == 0.7
     assert call["json"]["max_tokens"] == 1000
@@ -103,7 +106,8 @@ async def test_chat_joins_openai_sse_deltas(db) -> None:
         "bai", "https://api.b.ai/v1", "sk-test", model="gpt-5.2", is_default=True
     )
     stream = (
-        'data: {"choices":[{"delta":{"role":"assistant","content":"Hello"}}]}\n\n'
+        'data: {"model":"deepseek-v4-flash","choices":'
+        '[{"delta":{"role":"assistant","content":"Hello"}}]}\n\n'
         'data: {"choices":[{"delta":{"content":" world"}}]}\n\n'
         'data: {"choices":[{"delta":{"content":"!"},"finish_reason":null}]}\n\n'
         "data: [DONE]\n\n"
@@ -112,6 +116,7 @@ async def test_chat_joins_openai_sse_deltas(db) -> None:
     manager = AIManager(_ManagerBot(db, _ai_config(), http))
 
     assert await manager.chat("hi", history=False) == "Hello world!"
+    assert manager._last_reported_model == "deepseek-v4-flash"
     assert len(http.calls) == 1
     assert http.calls[0]["json"]["stream"] is True
 
@@ -406,12 +411,18 @@ async def test_gpt_reply_footer_shows_provider_and_model(bot: FakeBot) -> None:
 
     class _H:
         async def request(self, *a, **k):
-            return _Resp({"choices": [{"message": {"content": "answer"}}]})
+            return _Resp({
+                "model": "upstream-model",
+                "choices": [{"message": {"content": "answer"}}],
+            })
 
     bot.http = _H()
     event = FakeEvent(raw_text="gpt hi")
     await bot.registry.dispatch(bot, event, "gpt hi")
-    assert any("via bluesminds" in r and "gpt-luna" in r for r in event.replies)
+    footer = event.replies[-1]
+    assert "via bluesminds" in footer
+    assert "requested `gpt-luna`" in footer
+    assert "API reported `upstream-model`" in footer
 
 
 # --------------------------------------------------------------------------
