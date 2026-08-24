@@ -16,6 +16,7 @@ consistent across gateways.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import time
@@ -38,6 +39,7 @@ __all__ = [
     "RAPIDAPI_HOST",
     "RAPIDAPI_MODEL",
     "SYSTEM_PROMPT",
+    "AIImage",
     "AIManager",
     "CompletionResult",
     "ProviderStatus",
@@ -76,6 +78,21 @@ class ProviderStatusError(ProviderError):
 
 
 @dataclass(frozen=True, slots=True)
+class AIImage:
+    """One prepared image attachment for an OpenAI multimodal message."""
+
+    data: bytes
+    mime_type: str
+
+    def content_part(self) -> dict[str, Any]:
+        encoded = base64.b64encode(self.data).decode("ascii")
+        return {
+            "type": "image_url",
+            "image_url": {"url": f"data:{self.mime_type};base64,{encoded}"},
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class CompletionResult:
     """A completion plus the model identifier reported by the API response."""
 
@@ -98,7 +115,7 @@ class ProviderStatus:
 async def openai_completion(
     http: Any,
     *,
-    messages: Sequence[Mapping[str, str]],
+    messages: Sequence[Mapping[str, Any]],
     api_key: str,
     base_url: str,
     model: str,
@@ -707,8 +724,9 @@ class AIManager:
         history: bool = False,
         model: str | None = None,
         system: str | None = None,
+        images: Sequence[AIImage] | None = None,
     ) -> str:
-        messages: list[dict[str, str]] = [
+        messages: list[dict[str, Any]] = [
             {"role": "system", "content": system or SYSTEM_PROMPT}
         ]
         used_provider = ""
@@ -720,7 +738,13 @@ class AIManager:
             ):
                 messages.append({"role": stored.role, "content": stored.content})
 
-        messages.append({"role": "user", "content": prompt})
+        user_content: str | list[dict[str, Any]] = prompt
+        if images:
+            user_content = [
+                {"type": "text", "text": prompt},
+                *(image.content_part() for image in images),
+            ]
+        messages.append({"role": "user", "content": user_content})
         messages = _apply_budget(messages, self.config.memory_budget)
 
         metrics = getattr(self.bot, "metrics", None)
@@ -754,7 +778,7 @@ class AIManager:
 
     async def _complete_chain(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         model: str | None = None,
     ) -> str:
@@ -823,12 +847,18 @@ class AIManager:
         self,
         provider: AIProvider,
         *,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         model: str,
     ) -> CompletionResult:
         if provider.kind in ("rapidapi", "rapidapi_backup"):
+            if _messages_have_images(messages):
+                raise ProviderError("This AI provider does not support image input.")
             prompt = next(
-                (m["content"] for m in reversed(messages) if m["role"] == "user"),
+                (
+                    _message_text(m.get("content"))
+                    for m in reversed(messages)
+                    if m["role"] == "user"
+                ),
                 "",
             )
             answer = await rapidapi_completion(
@@ -984,11 +1014,11 @@ class AIManager:
 
 
 def _with_route_context(
-    messages: Sequence[Mapping[str, str]],
+    messages: Sequence[Mapping[str, Any]],
     *,
     provider: str,
     model: str,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """Tell the model which API route was requested without claiming proof.
 
     Language models cannot reliably introspect their own deployment identity.
@@ -1018,18 +1048,57 @@ def _dt_from_timestamp(ts: float) -> Any:
     return datetime.fromtimestamp(ts, tz=timezone.utc)
 
 
+def _message_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(
+        str(part.get("text", ""))
+        for part in content
+        if isinstance(part, Mapping) and part.get("type") == "text"
+    ).strip()
+
+
+def _messages_have_images(messages: Sequence[Mapping[str, Any]]) -> bool:
+    return any(
+        isinstance(message.get("content"), list)
+        and any(
+            isinstance(part, Mapping) and part.get("type") == "image_url"
+            for part in message["content"]
+        )
+        for message in messages
+    )
+
+
+def _content_budget_size(content: Any) -> int:
+    if isinstance(content, str):
+        return len(content)
+    if not isinstance(content, list):
+        return 0
+    size = len(_message_text(content))
+    # Reserve a modest token-equivalent budget for each visual input without
+    # counting the much larger base64 transport representation.
+    size += 4000 * sum(
+        1
+        for part in content
+        if isinstance(part, Mapping) and part.get("type") == "image_url"
+    )
+    return size
+
+
 def _apply_budget(
-    messages: list[dict[str, str]], budget: int
-) -> list[dict[str, str]]:
+    messages: list[dict[str, Any]], budget: int
+) -> list[dict[str, Any]]:
     """Drop the oldest non-system turns until the payload fits ``budget``."""
     if budget <= 0 or len(messages) <= 2:
         return messages
-    total = sum(len(m["content"]) for m in messages)
+    total = sum(_content_budget_size(m.get("content")) for m in messages)
     result = list(messages)
     while total > budget and len(result) > 2:
         # Index 1 is the oldest non-system message.
         removed = result.pop(1)
-        total -= len(removed["content"])
+        total -= _content_budget_size(removed.get("content"))
     return result
 
 

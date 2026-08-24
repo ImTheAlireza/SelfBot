@@ -26,7 +26,7 @@ Telegram account by typing commands into any chat.
 
 | | |
 |---|---|
-| 🧠 **AI** | Ask any OpenAI-compatible model with `gpt`, with per-chat memory, reply/edit mode, summarization, model selection and provider management. |
+| 🧠 **AI** | Ask any OpenAI-compatible model with `gpt`, including image replies for vision models, per-chat memory, summarization, model selection and provider management. |
 | 📁 **Files** | Zip/unzip with AES passwords, batch queues, rename, audio tag editing, PDF page extraction. |
 | ⏰ **Timers** | Live-updating countdowns that survive restarts. |
 | 🎨 **Stickers** | Render text to stickers and manage packs via a helper bot. |
@@ -156,9 +156,9 @@ preserved. Restart the corresponding process afterward to load the snapshot.
 ### AI — 4 commands
 | Command | Description |
 |---|---|
-| `gpt <prompt>` | Ask the active model. Reply to a message to feed it as context. Reply with `gpt edit [instruction]` to rewrite one of **your own** messages in place. |
+| `gpt <prompt>` | Ask the active model. Reply to text or an image to include it as context for a vision-capable model. Reply with `gpt edit [instruction]` to rewrite one of **your own** messages in place. |
 | `memory on\|off\|clear\|turns <n>\|status` | Per-chat conversation memory |
-| `summarize [n] [-lang en\|fa] [-brief\|-detailed]` | Summarize a replied message, document or last `n` messages |
+| `summarize [n] [-lang en\|fa] [-brief\|-detailed]` | Summarize a replied message, image, static sticker, document, or last `n` messages |
 | `ai [add\|remove\|default\|enable\|disable\|test\|model\|status]` | 👑 Manage providers and the active model — the **only** place to do so |
 
 There is exactly **one** chat command (`gpt`) and **one** management command
@@ -183,7 +183,11 @@ model from a different model identifier reported by the API. Keys still present 
 `BLUESMINDS_API_KEY` / `RAPIDAPI_KEY` are seeded automatically on first start.
 When a provider returns a temporary quota/rate-limit error it is skipped for a
 fixed 10 seconds by default (`AI_COOLDOWN_SECONDS`); `ai` shows who is cooling
-down.
+down. Model `<think>`, `<thinking>` and `<reasoning>` blocks are displayed as a
+separate Telegram quote, and the provider/model footer is always italic. Image
+replies and up to four visual messages in a conversation summary are sent using
+OpenAI-compatible multimodal `image_url` content. Static image stickers are
+converted to PNG/JPEG; TGS/video stickers are reported as unsupported.
 
 ### Messaging
 | Command | Description |
@@ -331,7 +335,7 @@ Manage them in chat: `plugin list`, `plugin load <path>`, `plugin reload <name>`
 ```bash
 pip install -e ".[dev,full]"
 
-pytest                      # 482 tests
+pytest                      # 485 tests
 pytest --cov=selfbot        # with coverage
 ruff check src tests        # lint
 mypy src/selfbot            # type check

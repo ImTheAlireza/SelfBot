@@ -425,9 +425,10 @@ async def test_gpt_reply_footer_shows_provider_and_model(bot: FakeBot) -> None:
     event = FakeEvent(raw_text="gpt hi")
     await bot.registry.dispatch(bot, event, "gpt hi")
     footer = event.replies[-1]
-    assert "via bluesminds" in footer
-    assert "requested `gpt-luna`" in footer
-    assert "API reported `upstream-model`" in footer
+    assert "<i>— via bluesminds" in footer
+    assert "requested gpt-luna" in footer
+    assert "API reported upstream-model" in footer
+    assert footer.endswith("</i>")
 
 
 # --------------------------------------------------------------------------

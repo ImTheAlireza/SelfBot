@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,14 @@ class _Sender:
     id: int = 4242
 
 
+def _png_bytes() -> bytes:
+    from PIL import Image
+
+    output = BytesIO()
+    Image.new("RGB", (2, 2), "red").save(output, "PNG")
+    return output.getvalue()
+
+
 @dataclass
 class _Replied:
     raw_text: str
@@ -45,10 +54,20 @@ class _Replied:
     id: int = 555
     photo: Any = None
     document: Any = None
+    sticker: Any = None
+    file: Any = None
+    media_bytes: bytes = b""
     edits: list[str] = field(default_factory=list)
 
     async def get_sender(self) -> _Sender:
         return _Sender()
+
+    async def download_media(self, *, file: Any) -> Any:
+        if file is bytes:
+            return self.media_bytes
+        path = Path(file) / "media.bin"
+        path.write_bytes(self.media_bytes)
+        return str(path)
 
     async def edit(self, text: str, **_kw: Any) -> _Replied:
         self.edits.append(text)
@@ -102,6 +121,58 @@ async def test_gpt_reply_includes_quoted_message(bot) -> None:
     assert "translate this" in user_content
 
 
+async def test_gpt_reply_sends_image_to_vision_model(bot) -> None:
+    from selfbot.plugins.ai import get_manager
+
+    await bot.db.add_provider(
+        "vision", "https://vision.example/v1", "sk-test", model="vision-model", is_default=True
+    )
+    manager = get_manager(type("C", (), {"bot": bot})())
+    bot.ai = manager
+    bot.http = _Http(answer="I see a red square")
+    replied = _Replied(raw_text="", photo=object(), media_bytes=_png_bytes())
+    event = FakeEvent(
+        raw_text="gpt describe this image",
+        is_reply=True,
+        reply_message=replied,
+    )
+
+    await bot.registry.dispatch(bot, event, event.raw_text)
+
+    content = bot.http.calls[0]["json"]["messages"][-1]["content"]
+    assert isinstance(content, list)
+    assert content[0] == {"type": "text", "text": "describe this image"}
+    assert content[1]["type"] == "image_url"
+    assert content[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+    assert any("I see a red square" in reply for reply in event.replies)
+
+
+def test_ai_response_formats_thinking_and_italic_footer() -> None:
+    from selfbot.plugins.ai import _format_ai_response
+
+    rendered = _format_ai_response(
+        "&lt;think&gt;Check the **details**.&lt;/think&gt;\nHello!",
+        provider="jasper",
+        requested_model="ox-alpha",
+        reported_model="x-preview-f-free",
+    )
+
+    assert "<b>💭 Thinking</b>" in rendered
+    assert "<blockquote expandable>" in rendered
+    assert "Check the <strong>details</strong>." in rendered
+    assert "Hello!" in rendered
+    assert "<i>— via jasper · requested ox-alpha" in rendered
+    assert "API reported x-preview-f-free" in rendered
+    assert rendered.endswith("</i>")
+
+    from telethon.extensions import html
+
+    _plain, entities = html.parse(rendered)
+    blockquote = next(entity for entity in entities if type(entity).__name__ == "MessageEntityBlockquote")
+    assert blockquote.collapsed is True
+    assert any(type(entity).__name__ == "MessageEntityItalic" for entity in entities)
+
+
 # --------------------------------------------------------------------------
 # gpt edit
 # --------------------------------------------------------------------------
@@ -152,6 +223,37 @@ async def test_summarize_replied_text(bot) -> None:
     # It must not persist into conversation memory.
     stored = await bot.db.count_ai_messages(event.chat_id)
     assert stored == 0
+
+
+async def test_summarize_sends_static_sticker_to_vision_model(bot) -> None:
+    from selfbot.plugins.ai import get_manager
+
+    await bot.db.add_provider(
+        "vision", "https://vision.example/v1", "sk-test", model="vision-model", is_default=True
+    )
+    manager = get_manager(type("C", (), {"bot": bot})())
+    bot.ai = manager
+    bot.http = _Http(answer="A red sticker")
+    replied = _Replied(
+        raw_text="",
+        document=object(),
+        sticker=object(),
+        media_bytes=_png_bytes(),
+    )
+    event = FakeEvent(
+        raw_text="summarize",
+        is_reply=True,
+        reply_message=replied,
+    )
+
+    await bot.registry.dispatch(bot, event, event.raw_text)
+
+    content = bot.http.calls[0]["json"]["messages"][-1]["content"]
+    assert isinstance(content, list)
+    assert any(part.get("type") == "image_url" for part in content)
+    text_part = next(part["text"] for part in content if part.get("type") == "text")
+    assert "static sticker" in text_part
+    assert any("A red sticker" in reply for reply in event.replies)
 
 
 async def test_summarize_requires_reply_or_count(bot) -> None:
