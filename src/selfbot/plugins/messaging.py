@@ -190,6 +190,89 @@ async def cmd_del(ctx: Context) -> None:
     await ctx.respond(f"🗑 Deleted **{deleted}** message(s) in this chat.")
 
 
+@command(
+    "delto",
+    category=CATEGORY,
+    sudo_only=True,
+    requires_reply=True,
+    max_args=1,
+    usage="delto [-me]",
+    examples=("delto", "delto -me"),
+)
+async def cmd_delto(ctx: Context) -> None:
+    """Delete from this command back through the replied message, inclusive.
+
+    No confirmation is requested. With ``-me``, only messages sent by this
+    account are deleted; the replied message still defines the lower boundary.
+    """
+    if ctx.args and (len(ctx.args) != 1 or ctx.args[0].lower() != "-me"):
+        raise UsageError("Usage: `delto [-me]`")
+    own_only = bool(ctx.args)
+
+    replied = await ctx.get_reply_message()
+    target_id = getattr(replied, "id", None)
+    command_id = getattr(ctx.event, "id", None)
+    if not isinstance(target_id, int) or not isinstance(command_id, int):
+        raise ValidationError("Could not determine the message range.")
+    if target_id > command_id:
+        raise ValidationError("The replied message must be older than this command.")
+
+    matched, deleted = await _delete_message_range(
+        ctx,
+        target_id=target_id,
+        command_id=command_id,
+        own_only=own_only,
+    )
+    if deleted < matched:
+        logger.warning(
+            "delto deleted %d/%d messages in chat %s",
+            deleted,
+            matched,
+            ctx.chat_id,
+        )
+
+
+async def _delete_message_range(
+    ctx: Context,
+    *,
+    target_id: int,
+    command_id: int,
+    own_only: bool,
+) -> tuple[int, int]:
+    """Delete an inclusive ID range in batches, newest to oldest."""
+    matched = 0
+    deleted = 0
+    batch: list[int] = []
+    from_user = "me" if own_only else None
+
+    async for message in ctx.client.iter_messages(
+        ctx.chat_id,
+        limit=None,
+        from_user=from_user,
+        min_id=max(0, target_id - 1),
+        max_id=command_id + 1,
+    ):
+        message_id = getattr(message, "id", None)
+        if not isinstance(message_id, int):
+            continue
+        # Keep explicit guards even though Telegram's min/max filters are
+        # exclusive; they protect against permissive test doubles and API edge
+        # cases while messages are arriving during deletion.
+        if message_id > command_id:
+            continue
+        if message_id < target_id:
+            break
+        matched += 1
+        batch.append(message_id)
+        if len(batch) == 100:
+            deleted += await _delete_batch(ctx, batch)
+            batch = []
+
+    if batch:
+        deleted += await _delete_batch(ctx, batch)
+    return matched, deleted
+
+
 async def _delete_matching_messages(
     ctx: Context,
     *,

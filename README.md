@@ -20,7 +20,7 @@
 
 ## What it does
 
-58 commands across AI, file manipulation, timers, stickers, QR codes, weather,
+59 commands across AI, file manipulation, timers, stickers, QR codes, weather,
 dictionaries, search, backups and chat automation — all driven from your own
 Telegram account by typing commands into any chat.
 
@@ -189,6 +189,7 @@ down.
 | `spam <message> <count>` | Repeat a message, rate-limit aware |
 | `cancel` | Stop your running spam task |
 | `del <count\|type> [-me]` | 👑 Delete messages in the current chat; `-me` limits it to yours |
+| `delto [-me]` | 👑 Reply to a message and delete from the command back through it, without confirmation |
 | `info [user]` | User details and profile photo (reply, mention, or yourself) |
 | `qreply set\|remove\|list\|info` | Manage `-alias` shortcuts |
 | `-<alias>` | Expand a quick reply in place |
@@ -198,6 +199,11 @@ down.
 select another chat. Without `-me`, it targets messages from everyone that your
 account is allowed to delete. Append `-me` to target only your messages, for
 example `del 400 -me`, `del photos -me`, or `del all -me`.
+
+`delto` is intentionally immediate: reply to the oldest message that should be
+removed and send `delto`; it deletes every message from the command back through
+the replied message, inclusive, without confirmation. Use `delto -me` to delete
+only your own messages inside that range.
 
 Types: `photos`, `videos`, `voices`, `videomsgs`, `musics`, `files`, `stickers`,
 `gifs`, `links`, `all`.
@@ -323,7 +329,7 @@ Manage them in chat: `plugin list`, `plugin load <path>`, `plugin reload <name>`
 ```bash
 pip install -e ".[dev,full]"
 
-pytest                      # 462 tests
+pytest                      # 466 tests
 pytest --cov=selfbot        # with coverage
 ruff check src tests        # lint
 mypy src/selfbot            # type check

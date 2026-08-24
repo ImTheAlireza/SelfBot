@@ -114,8 +114,9 @@ def _delete_message(message_id: int, **media):
     return type("DeleteMessage", (), values)()
 
 
-def test_del_is_the_only_deletion_command(registry):
+def test_deletion_commands_are_registered(registry):
     assert registry.get("del") is not None
+    assert registry.get("delto") is not None
     assert registry.get("purge") is None
 
 
@@ -209,6 +210,100 @@ async def test_del_rejects_me_flag_before_target(bot, registry):
 
     assert any("final argument" in reply for reply in event.replies)
     assert bot.client.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_delto_deletes_through_replied_message_inclusive_without_confirmation(
+    bot, registry
+):
+    iterator_calls = []
+
+    async def iter_messages(
+        chat_id, *, limit, from_user, min_id, max_id
+    ):
+        iterator_calls.append((chat_id, limit, from_user, min_id, max_id))
+        for message_id in range(200, 49, -1):
+            yield _delete_message(message_id)
+
+    bot.client.iter_messages = iter_messages
+    replied = FakeMessage(id=50)
+    event = FakeEvent(
+        raw_text="delto",
+        id=200,
+        chat_id=-555,
+        is_reply=True,
+        reply_message=replied,
+    )
+
+    await registry.dispatch(bot, event, event.raw_text)
+
+    assert iterator_calls == [(-555, None, None, 49, 201)]
+    assert bot.confirm_prompts == []
+    assert [len(ids) for _chat_id, ids in bot.client.deleted] == [100, 51]
+    deleted_ids = [
+        message_id
+        for _chat_id, ids in bot.client.deleted
+        for message_id in ids
+    ]
+    assert deleted_ids == list(range(200, 49, -1))
+    assert event.replies == []
+    assert event.responses == []
+
+
+@pytest.mark.asyncio
+async def test_delto_me_only_deletes_own_messages_inside_range(bot, registry):
+    iterator_calls = []
+
+    async def iter_messages(
+        chat_id, *, limit, from_user, min_id, max_id
+    ):
+        iterator_calls.append((chat_id, limit, from_user, min_id, max_id))
+        # A permissive fake includes one older message; the explicit boundary
+        # guard must prevent it from being deleted.
+        for message_id in (200, 180, 150, 99):
+            yield _delete_message(message_id)
+
+    bot.client.iter_messages = iter_messages
+    event = FakeEvent(
+        raw_text="delto -me",
+        id=200,
+        chat_id=-777,
+        is_reply=True,
+        reply_message=FakeMessage(id=100),
+    )
+
+    await registry.dispatch(bot, event, event.raw_text)
+
+    assert iterator_calls == [(-777, None, "me", 99, 201)]
+    assert bot.client.deleted == [(-777, [200, 180, 150])]
+    assert bot.confirm_prompts == []
+
+
+@pytest.mark.asyncio
+async def test_delto_requires_a_reply(bot, registry):
+    event = FakeEvent(raw_text="delto")
+
+    await registry.dispatch(bot, event, event.raw_text)
+
+    assert any("Reply to a message" in reply for reply in event.replies)
+    assert bot.client.deleted == []
+    assert bot.confirm_prompts == []
+
+
+@pytest.mark.asyncio
+async def test_delto_rejects_unknown_arguments(bot, registry):
+    event = FakeEvent(
+        raw_text="delto all",
+        id=20,
+        is_reply=True,
+        reply_message=FakeMessage(id=10),
+    )
+
+    await registry.dispatch(bot, event, event.raw_text)
+
+    assert any("delto [-me]" in reply for reply in event.replies)
+    assert bot.client.deleted == []
+    assert bot.confirm_prompts == []
 
 
 # ---------------------------------------------------------------------------
