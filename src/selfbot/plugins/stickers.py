@@ -245,6 +245,7 @@ def render_sticker(text: str, output: Path, watermark: str = "") -> Path:
 )
 async def cmd_stick(ctx: Context) -> None:
     """Turn text into a sticker, optionally saving it to the open pack."""
+    ctx.require_single_dash_flags("-save")
     raw = ctx.raw_args.strip()
     save = False
     if raw.lower().startswith("-save"):

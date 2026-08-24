@@ -25,6 +25,7 @@ async def test_help_lists_every_category(bot, registry):
     output = " ".join(event.replies)
     for category in ("Core", "Files", "Timers", "Utilities"):
         assert category in output
+    assert "flags use one dash" in output
 
 
 @pytest.mark.asyncio
@@ -34,6 +35,14 @@ async def test_help_for_single_command(bot, registry):
     output = " ".join(event.replies)
     assert "settimer" in output
     assert "Usage" in output
+
+
+def test_all_command_help_uses_single_dash_flags(registry):
+    for registered in registry.all():
+        help_text = " ".join(
+            (registered.usage, *registered.examples)
+        )
+        assert "--" not in help_text, registered.name
 
 
 @pytest.mark.asyncio

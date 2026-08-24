@@ -41,6 +41,7 @@ async def cmd_setautoreply(ctx: Context) -> None:
       • `-nr` — only reply if the triggering message is **not** a reply
       • `-sr` — only reply if the triggering message is a **reply to me**
     """
+    ctx.require_single_dash_flags(*_REPLY_CONDITION_FLAGS)
     # Separate flags from positional args.
     raw_args = list(ctx.args)
     flags = [a for a in raw_args if a.lower() in _REPLY_CONDITION_FLAGS]
@@ -102,6 +103,7 @@ async def cmd_remautoreply(ctx: Context) -> None:
 
     Use `-allchats` to wipe every auto-reply across all chats.
     """
+    ctx.require_single_dash_flags("-allchats")
     # Check for -allchats flag.
     if ctx.args[0].lower() == "-allchats":
         rules = await ctx.db.list_all_auto_replies()

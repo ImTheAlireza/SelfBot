@@ -129,6 +129,7 @@ async def cmd_del(ctx: Context) -> None:
     The chat is always taken from the command event. No argument can select or
     affect another chat.
     """
+    ctx.require_single_dash_flags("-me")
     lowered = [arg.lower() for arg in ctx.args]
     if "-me" in lowered[:-1] or lowered.count("-me") > 1:
         raise UsageError("`-me` must be the final argument: `del <count|type> -me`")
@@ -205,6 +206,7 @@ async def cmd_delto(ctx: Context) -> None:
     No confirmation is requested. With ``-me``, only messages sent by this
     account are deleted; the replied message still defines the lower boundary.
     """
+    ctx.require_single_dash_flags("-me")
     if ctx.args and (len(ctx.args) != 1 or ctx.args[0].lower() != "-me"):
         raise UsageError("Usage: `delto [-me]`")
     own_only = bool(ctx.args)

@@ -160,6 +160,27 @@ async def test_summarize_requires_reply_or_count(bot) -> None:
     assert any("Reply to" in r for r in event.replies)
 
 
+async def test_summarize_accepts_single_dash_flags(bot) -> None:
+    from selfbot.plugins.ai import get_manager
+
+    manager = get_manager(type("C", (), {"bot": bot})())
+    bot.ai = manager
+    bot.http = _Http(answer="خلاصه")
+    replied = _Replied(raw_text="A message to summarize.")
+    event = FakeEvent(
+        raw_text="summarize -lang fa -brief",
+        is_reply=True,
+        reply_message=replied,
+    )
+
+    await bot.registry.dispatch(bot, event, event.raw_text)
+
+    assert any("خلاصه" in reply for reply in event.replies)
+    prompt = bot.http.calls[0]["json"]["messages"][-1]["content"]
+    assert "Respond in Persian" in prompt
+    assert "short bullet list" in prompt
+
+
 async def test_summarize_conversation(bot) -> None:
     from selfbot.plugins.ai import get_manager
 

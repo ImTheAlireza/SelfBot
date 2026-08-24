@@ -110,6 +110,7 @@ async def cmd_selfwlc(ctx: Context) -> None:
     switched on. Tags: `[name]`, `[nametag]`, `[username]`,
     `[[username]/[nametag]]`.
     """
+    ctx.require_single_dash_flags("-all")
     action = ctx.args[0].lower()
     flag = (ctx.arg(1) or "").lower()
 

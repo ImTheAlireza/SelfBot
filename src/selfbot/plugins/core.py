@@ -76,6 +76,7 @@ async def cmd_help(ctx: Context) -> None:
         lines.append("")
 
     lines.append(f"Run `{prefix}help <command>` for usage and examples.")
+    lines.append("All command flags use one dash, for example `-here` or `-force`.")
     await ctx.reply("\n".join(lines))
 
 

@@ -12,8 +12,8 @@ A plugin may optionally expose:
 * ``async def teardown(bot)`` — awaited on unload/reload/shutdown.
 
 Plugins execute with the same privileges as the bot (full account access), so
-installing third-party code is explicitly gated behind ``plugin install
---trust``.
+installing third-party code is explicitly gated behind
+``plugin install -trust``.
 """
 
 from __future__ import annotations

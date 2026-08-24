@@ -115,7 +115,9 @@ Tables are created automatically on first run.
 ## Commands
 
 Commands are typed as plain messages from your own account. Set
-`COMMAND_PREFIX=.` if you'd rather write `.help`.
+`COMMAND_PREFIX=.` if you'd rather write `.help`. Every Telegram command flag
+uses exactly one dash (`-lang`, `-here`, `-force`); double-dash forms are
+rejected with the correct spelling.
 
 ### Core
 | Command | Description |
@@ -329,7 +331,7 @@ Manage them in chat: `plugin list`, `plugin load <path>`, `plugin reload <name>`
 ```bash
 pip install -e ".[dev,full]"
 
-pytest                      # 466 tests
+pytest                      # 482 tests
 pytest --cov=selfbot        # with coverage
 ruff check src tests        # lint
 mypy src/selfbot            # type check

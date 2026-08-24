@@ -256,11 +256,12 @@ async def _gpt_edit(ctx: Context) -> None:
 @command(
     "summarize",
     category=CATEGORY,
-    usage="summarize [n] [--lang en|fa] [--brief|--detailed]",
-    examples=("summarize", "summarize 50 --brief", "summarize --lang fa"),
+    usage="summarize [n] [-lang en|fa] [-brief|-detailed]",
+    examples=("summarize", "summarize 50 -brief", "summarize -lang fa"),
 )
 async def cmd_summarize(ctx: Context) -> None:
     """Summarize a replied message, document, or the last N messages."""
+    ctx.require_single_dash_flags("-lang", "-brief", "-detailed")
     args = list(ctx.args)
     brief = "-brief" in args
     detailed = "-detailed" in args
@@ -283,7 +284,7 @@ async def cmd_summarize(ctx: Context) -> None:
             raise ValidationError("Count must be between 1 and 500.")
     if args:
         raise UsageError(
-            "Usage: `summarize [n] [--lang en|fa] [--brief|--detailed]`"
+            "Usage: `summarize [n] [-lang en|fa] [-brief|-detailed]`"
         )
 
     manager = get_manager(ctx)
@@ -592,6 +593,7 @@ async def _ai_model(ctx: Context, manager: AIManager, args: list[str]) -> None:
 
 
 async def _ai_add(ctx: Context, manager: AIManager, args: list[str]) -> None:
+    ctx.require_single_dash_flags("-name", "-model")
     parsed = _parse_add_args(args)
 
     # _parse_add_args guarantees base_url and api_key are present (it raises
@@ -658,7 +660,7 @@ async def _ai_add(ctx: Context, manager: AIManager, args: list[str]) -> None:
 def _parse_add_args(args: list[str]) -> dict[str, str | None]:
     """Identify the URL, API key, optional name and model in any order.
 
-    Accepts either positional tokens or ``--name``/``--model`` flags. The name
+    Accepts either positional tokens or ``-name``/``-model`` flags. The name
     may be omitted entirely and is then derived from the hostname.
     """
     flags: dict[str, str] = {}
