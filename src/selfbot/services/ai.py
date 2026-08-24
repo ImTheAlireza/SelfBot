@@ -64,7 +64,6 @@ BACKUP_RAPIDAPI_GENERE = "ai-gf-1"
 
 #: HTTP statuses that mean "try the next provider" instead of "user error".
 _FALLBACK_STATUSES = frozenset({408, 429, 502, 503, 504})
-_COOLDOWN_BASE = 60.0
 _MODELS_CACHE_TTL = 600.0
 
 
@@ -538,7 +537,6 @@ class AIManager:
     def __init__(self, bot: Any) -> None:
         self.bot = bot
         self._cache: list[AIProvider] | None = None
-        self._consecutive_failures: dict[str, int] = {}
         self._models_cache: dict[str, tuple[float, list[str]]] = {}
 
     # -- providers --------------------------------------------------------
@@ -799,7 +797,6 @@ class AIManager:
                 continue
 
             await self.db.record_provider_result(provider.name, success=True)
-            self._consecutive_failures.pop(provider.name, None)
             self._last_provider = provider.name
             self._last_model = use_model
             self._last_reported_model = result.reported_model
@@ -874,10 +871,10 @@ class AIManager:
             provider.name, success=False, error=message
         )
         if fallback:
-            count = self._consecutive_failures.get(provider.name, 0) + 1
-            self._consecutive_failures[provider.name] = count
+            # A short fixed cooldown lets the provider recover without making
+            # every consecutive temporary failure wait exponentially longer.
             seconds = min(
-                _COOLDOWN_BASE * (2 ** (count - 1)),
+                float(self.config.cooldown_seconds),
                 float(self.config.cooldown_max),
             )
             until = utcnow().timestamp() + seconds

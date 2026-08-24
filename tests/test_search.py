@@ -145,7 +145,8 @@ def test_parse_date_iso_and_relative() -> None:
 
 def test_parse_date_relative_units() -> None:
     d = parse_date("7d")
-    assert (NOW - d).days in (6, 7)
+    age = datetime.now(timezone.utc) - d
+    assert abs(age - timedelta(days=7)) < timedelta(seconds=1)
 
 
 def test_parse_date_rejects_garbage() -> None:

@@ -113,6 +113,7 @@ class AIConfig:
     bluesminds_model: str = ANYAPI_DEFAULT_MODEL
     memory_turns: int = 10
     memory_budget: int = 24000
+    cooldown_seconds: int = 10
     cooldown_max: int = 900
 
     @property
@@ -300,6 +301,9 @@ def load_config(
         memory_turns=max(0, min(50, _env_int("AI_MEMORY_TURNS", 10) or 10)),
         memory_budget=max(
             1000, _env_int("AI_MEMORY_BUDGET", 24000) or 24000
+        ),
+        cooldown_seconds=max(
+            0, _env_int("AI_COOLDOWN_SECONDS", 10) or 0
         ),
         cooldown_max=max(0, _env_int("AI_COOLDOWN_MAX", 900) or 900),
     )

@@ -168,8 +168,9 @@ supported. A copied full endpoint such as `/v1/chat/completions` is normalized
 to its base URL automatically. GPT response footers distinguish the requested
 model from a different model identifier reported by the API. Keys still present in `ANYAPI_KEY` /
 `BLUESMINDS_API_KEY` / `RAPIDAPI_KEY` are seeded automatically on first start.
-When a provider returns a quota/rate-limit error it is temporarily skipped with
-exponential back-off; `ai` shows who is cooling down.
+When a provider returns a temporary quota/rate-limit error it is skipped for a
+fixed 10 seconds by default (`AI_COOLDOWN_SECONDS`); `ai` shows who is cooling
+down.
 
 ### Messaging
 | Command | Description |

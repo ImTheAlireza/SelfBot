@@ -72,6 +72,7 @@ def _ai_config(**overrides: Any) -> AIConfig:
         "bluesminds_model": ANYAPI_DEFAULT_MODEL,
         "memory_turns": 10,
         "memory_budget": 24000,
+        "cooldown_seconds": 10,
         "cooldown_max": 900,
     }
     base.update(overrides)
@@ -150,6 +151,8 @@ async def test_chat_does_not_retry_authentication_errors(db) -> None:
 
 
 async def test_chat_falls_back_to_next_provider_on_429(db) -> None:
+    from selfbot.db import utcnow
+
     await db.add_provider(
         "a", "https://a/v1", "ka", model="ma", is_default=True
     )
@@ -167,6 +170,8 @@ async def test_chat_falls_back_to_next_provider_on_429(db) -> None:
     a = await db.get_provider("a")
     assert a is not None and a.failure_count >= 1
     assert a.cooldown_until is not None
+    remaining = (a.cooldown_until - utcnow()).total_seconds()
+    assert 0 < remaining <= 10
     b = await db.get_provider("b")
     assert b is not None and b.success_count >= 1
 
