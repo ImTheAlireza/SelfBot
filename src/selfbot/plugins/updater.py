@@ -7,7 +7,9 @@ from ..registry import Context, command
 from ..services.updater import (
     ProjectUpdateError,
     ProjectUpdater,
+    parse_getcode_request,
     parse_github_branch_url,
+    resolve_update_target,
 )
 from ..utils.text import format_bytes
 
@@ -18,24 +20,24 @@ CATEGORY = "System"
     "getcode",
     category=CATEGORY,
     sudo_only=True,
-    min_args=1,
-    usage="getcode <GitHub branch URL>",
+    min_args=2,
+    usage="getcode <GitHub branch URL> <destination folder>",
     examples=(
-        "getcode https://github.com/ImTheAlireza/SelfBot/tree/arena%2F01a0337b-selfbot",
+        "getcode https://github.com/ImTheAlireza/SelfBot/tree/arena%2F01a0337b-selfbot Selfbot",
     ),
 )
 async def cmd_getcode(ctx: Context) -> None:
     """Replace the deployed project with a validated GitHub branch snapshot."""
-    raw_url = ctx.raw_args.strip()
-    if not raw_url:
-        raise UsageError("Usage: `getcode <GitHub branch URL>`")
+    raw_request = ctx.raw_args.strip()
+    if not raw_request:
+        raise UsageError("Usage: `getcode <GitHub branch URL> <destination folder>`")
 
     try:
-        source = parse_github_branch_url(raw_url)
+        branch_url, destination = parse_getcode_request(raw_request)
+        source = parse_github_branch_url(branch_url)
+        target = resolve_update_target(ctx.config.project_update_root, destination)
     except ProjectUpdateError as exc:
         raise ValidationError(str(exc)) from None
-
-    target = ctx.config.project_update_dir
     confirmed = await ctx.bot.confirm(
         ctx.event,
         "⚠️ **Replace deployed project code?**\n"
@@ -50,12 +52,10 @@ async def cmd_getcode(ctx: Context) -> None:
         await ctx.reply("👍 Code update cancelled.")
         return
 
-    status = await ctx.reply(
-        f"📥 Downloading and validating `{source.label}`…"
-    )
+    status = await ctx.reply(f"📥 Downloading and validating `{source.label}`…")
     updater = ProjectUpdater(target)
     try:
-        result = await updater.update(raw_url)
+        result = await updater.update(branch_url)
     except ProjectUpdateError as exc:
         await ctx.bot.edit(status, f"❌ Code update failed safely:\n`{exc}`")
         return
@@ -74,5 +74,6 @@ async def cmd_getcode(ctx: Context) -> None:
         f"Target: `{result.target}`\n"
         f"Snapshot: `{result.files}` files · `{format_bytes(result.bytes)}`\n\n"
         "Existing code was overwritten and stale code was removed. Runtime state was preserved.\n"
-        f"Run `{ctx.config.command_prefix}self restart` to load the new code.",
+        f"Restart `{destination}`'s process/service to load the new code. If this is the "
+        f"current SelfBot, run `{ctx.config.command_prefix}self restart`.",
     )

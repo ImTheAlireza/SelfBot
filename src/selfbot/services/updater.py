@@ -26,7 +26,9 @@ __all__ = [
     "ProjectUpdateError",
     "ProjectUpdateResult",
     "ProjectUpdater",
+    "parse_getcode_request",
     "parse_github_branch_url",
+    "resolve_update_target",
 ]
 
 logger = logging.getLogger(__name__)
@@ -35,7 +37,11 @@ _MAX_FILES = 10_000
 _MAX_BYTES = 128 * 1024 * 1024
 _UPDATE_LOCK = asyncio.Lock()
 _GITHUB_PART = re.compile(r"^[A-Za-z0-9_.-]+$")
+_DESTINATION_FOLDER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _MARKDOWN_LINK = re.compile(r"^\[[^\]]+\]\((https://[^)]+)\)$")
+_MARKDOWN_REQUEST = re.compile(r"^\[[^\]]+\]\((https://[^)]+)\)\s+(.+)$")
+_BRACKET_REQUEST = re.compile(r"^\[(https://[^\]]+)\]\s+(.+)$")
+_PLAIN_REQUEST = re.compile(r"^(https://\S+)\s+(.+)$")
 _PRESERVE_EXACT = frozenset(
     {
         ".env",
@@ -76,6 +82,63 @@ class ProjectUpdateResult:
     bytes: int
 
 
+def parse_getcode_request(value: str) -> tuple[str, str]:
+    """Return ``(branch_url, destination_folder)`` from command arguments.
+
+    Plain URLs, bracketed URLs and Telegram Markdown links are accepted. Common
+    formatting wrappers around the complete command argument are ignored.
+    """
+    value = _strip_formatting_wrapper(value.strip())
+    match = (
+        _MARKDOWN_REQUEST.fullmatch(value)
+        or _BRACKET_REQUEST.fullmatch(value)
+        or _PLAIN_REQUEST.fullmatch(value)
+    )
+    if match is None:
+        raise ProjectUpdateError("Usage: `getcode <GitHub branch URL> <destination folder>`.")
+
+    branch_url = match.group(1).strip()
+    destination = _strip_formatting_wrapper(match.group(2).strip())
+    _validate_destination_folder(destination)
+    return branch_url, destination
+
+
+def _strip_formatting_wrapper(value: str) -> str:
+    wrappers = (("++**", "**++"), ("**", "**"), ("++", "++"), ("__", "__"), ("`", "`"))
+    changed = True
+    while changed:
+        changed = False
+        for prefix, suffix in wrappers:
+            if value.startswith(prefix) and value.endswith(suffix):
+                value = value[len(prefix) : -len(suffix)].strip()
+                changed = True
+                break
+    return value
+
+
+def _validate_destination_folder(destination: str) -> None:
+    if (
+        not _DESTINATION_FOLDER.fullmatch(destination)
+        or destination in {".", ".."}
+        or destination.endswith(".lock")
+    ):
+        raise ProjectUpdateError(
+            "Destination must be one safe folder name using letters, numbers, '.', '-' or '_'."
+        )
+
+
+def resolve_update_target(root: Path, destination: str) -> Path:
+    """Resolve one direct child of the configured update root."""
+    _validate_destination_folder(destination)
+    root = Path(os.path.abspath(Path(root).expanduser()))
+    if root.is_symlink():
+        raise ProjectUpdateError("The configured project update root cannot be a symlink.")
+    target = root / destination
+    if target.parent != root:
+        raise ProjectUpdateError("Destination escapes the configured update root.")
+    return target
+
+
 def parse_github_branch_url(value: str) -> GitHubBranch:
     """Parse ``https://github.com/<owner>/<repo>/tree/<branch>`` safely.
 
@@ -99,9 +162,7 @@ def parse_github_branch_url(value: str) -> GitHubBranch:
 
     parts = parsed.path.strip("/").split("/")
     if len(parts) < 4 or parts[2].lower() != "tree":
-        raise ProjectUpdateError(
-            "Expected `https://github.com/<owner>/<repo>/tree/<branch>`."
-        )
+        raise ProjectUpdateError("Expected `https://github.com/<owner>/<repo>/tree/<branch>`.")
 
     owner = unquote(parts[0])
     repository = unquote(parts[1])
@@ -154,12 +215,8 @@ class ProjectUpdater:
             checkout = workspace / "checkout"
             try:
                 commit = await self._clone(source, checkout)
-                files, total_bytes = await asyncio.to_thread(
-                    _validate_checkout, checkout
-                )
-                await asyncio.to_thread(
-                    _replace_project_contents, checkout, self.target
-                )
+                files, total_bytes = await asyncio.to_thread(_validate_checkout, checkout)
+                await asyncio.to_thread(_replace_project_contents, checkout, self.target)
             finally:
                 await asyncio.to_thread(shutil.rmtree, workspace, True)
 
@@ -203,9 +260,7 @@ class ProjectUpdater:
         except FileNotFoundError:
             raise ProjectUpdateError("`git` is not installed on this server.") from None
         try:
-            _stdout, stderr = await asyncio.wait_for(
-                process.communicate(), timeout=180
-            )
+            _stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=180)
         except asyncio.TimeoutError:
             process.kill()
             await process.communicate()
@@ -245,14 +300,40 @@ async def _run_process(*args: str) -> tuple[int, str, str]:
 
 def _validate_checkout(checkout: Path) -> tuple[int, int]:
     """Reject malformed, unexpectedly large or unsafe project snapshots."""
-    required = (checkout / "pyproject.toml", checkout / "src" / "selfbot" / "__init__.py")
-    if not all(path.is_file() for path in required):
-        raise ProjectUpdateError(
-            "Downloaded branch is not a SelfBot project (required files are missing)."
-        )
-
     files = 0
     total_bytes = 0
+    looks_like_code = False
+    project_markers = {
+        "pyproject.toml",
+        "requirements.txt",
+        "setup.py",
+        "setup.cfg",
+        "package.json",
+        "composer.json",
+        "go.mod",
+        "Cargo.toml",
+        "Dockerfile",
+        "pom.xml",
+        "build.gradle",
+        "Gemfile",
+        "mix.exs",
+    }
+    code_suffixes = {
+        ".py",
+        ".js",
+        ".ts",
+        ".tsx",
+        ".jsx",
+        ".php",
+        ".go",
+        ".rs",
+        ".java",
+        ".kt",
+        ".rb",
+        ".cs",
+        ".sh",
+    }
+
     for path in checkout.rglob("*"):
         relative = path.relative_to(checkout)
         if relative.parts and relative.parts[0] == ".git":
@@ -263,14 +344,14 @@ def _validate_checkout(checkout: Path) -> tuple[int, int]:
             continue
         files += 1
         total_bytes += path.stat().st_size
+        if path.name in project_markers or path.suffix.lower() in code_suffixes:
+            looks_like_code = True
         if files > _MAX_FILES:
             raise ProjectUpdateError(
                 f"Downloaded project has too many files (more than {_MAX_FILES:,})."
             )
         if total_bytes > _MAX_BYTES:
-            raise ProjectUpdateError(
-                "Downloaded project is larger than the 128 MiB safety limit."
-            )
+            raise ProjectUpdateError("Downloaded project is larger than the 128 MiB safety limit.")
         if path.suffix == ".py":
             try:
                 with tokenize.open(path) as source:
@@ -280,6 +361,8 @@ def _validate_checkout(checkout: Path) -> tuple[int, int]:
                     f"Python validation failed for `{relative}`: {exc}"
                 ) from exc
 
+    if not files or not looks_like_code:
+        raise ProjectUpdateError("Downloaded branch does not look like a supported code project.")
     return files, total_bytes
 
 

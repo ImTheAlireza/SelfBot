@@ -94,7 +94,7 @@ Telegram, storage, logging, and process settings are environment-driven. See
 | `ANYAPI_KEY` / `BLUESMINDS_API_KEY` / `RAPIDAPI_KEY` | | — | AI keys seeded into the DB on first run; managed afterward via `ai` |
 | `HEALTH_PORT` / `HEALTH_BIND` | | disabled / `127.0.0.1` | Enable the `/healthz` HTTP endpoint |
 | `PLUGINS_DIR` | | `DATA_DIR/plugins` | Directory for external plugins |
-| `PROJECT_UPDATE_DIR` | | `/home/selfnit4/self/public/Selfbot` | Deployment replaced by the owner-only `getcode` command |
+| `PROJECT_UPDATE_ROOT` | | `/home/selfnit4/self/public` | Parent directory containing deployments managed by `getcode` |
 | `SUPERVISOR_PROCESS` | | `selfbot` | Enables supervisor-backed status and logs |
 | `MAX_FILE_SIZE_MB` | | `512` | Ceiling on downloads and uploads |
 
@@ -126,19 +126,21 @@ Commands are typed as plain messages from your own account. Set
 | `status` | Uptime and runtime counters |
 | `health [metrics]` | 👑 Tasks, memory, DB, AI and recent API failures |
 | `self on\|off\|restart\|status\|logs\|diag` | 👑 Process control and supervisor troubleshooting |
-| `getcode <GitHub branch URL>` | 👑 Validate and overwrite deployed project code while preserving runtime state |
+| `getcode <GitHub branch URL> <folder>` | 👑 Validate and overwrite one deployment under `PROJECT_UPDATE_ROOT` |
 | `plugin list\|load\|reload\|unload\|enable\|disable\|install\|path` | 👑 Manage external plugins |
 
 `self restart` directly replaces the current Python process while preserving
 its PID and environment. It deliberately does not call `supervisorctl restart`,
 which can deadlock when invoked by the process being restarted.
 
-`getcode` accepts only an HTTPS GitHub `/tree/<branch>` URL and asks for an
-in-chat confirmation. It downloads into a sibling staging directory, validates
-project structure, size, symlinks and Python syntax, then transactionally
-replaces all code under `PROJECT_UPDATE_DIR`. Stale code is removed; `.env`,
-`data`, virtualenvs, session files and logs are preserved. Run `self restart`
-afterward to load the new snapshot.
+`getcode` accepts an HTTPS GitHub `/tree/<branch>` URL plus one safe destination
+folder and asks for an in-chat confirmation. For example, `getcode <url>
+Selfbot` updates `/home/selfnit4/self/public/Selfbot`; `getcode <url> OtherBot`
+updates the sibling `OtherBot` deployment. It downloads into a sibling staging
+directory, validates project structure, size, symlinks and Python syntax, then
+transactionally replaces that folder's code. Path traversal is rejected. Stale
+code is removed; `.env`, `data`, virtualenvs, session files and logs are
+preserved. Restart the corresponding process afterward to load the snapshot.
 
 ### Admin 👑
 | Command | Description |
@@ -321,7 +323,7 @@ Manage them in chat: `plugin list`, `plugin load <path>`, `plugin reload <name>`
 ```bash
 pip install -e ".[dev,full]"
 
-pytest                      # 454 tests
+pytest                      # 462 tests
 pytest --cov=selfbot        # with coverage
 ruff check src tests        # lint
 mypy src/selfbot            # type check

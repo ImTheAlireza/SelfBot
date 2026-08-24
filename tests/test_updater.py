@@ -14,22 +14,19 @@ from selfbot.services.updater import (
     ProjectUpdateResult,
     _replace_project_contents,
     _validate_checkout,
+    parse_getcode_request,
     parse_github_branch_url,
+    resolve_update_target,
 )
 
-BRANCH_URL = (
-    "https://github.com/ImTheAlireza/SelfBot/"
-    "tree/arena%2F01a0337b-selfbot"
-)
+BRANCH_URL = "https://github.com/ImTheAlireza/SelfBot/tree/arena%2F01a0337b-selfbot"
 
 
 def _project(directory: Path, marker: str = "new") -> Path:
     (directory / "src" / "selfbot").mkdir(parents=True)
     (directory / "pyproject.toml").write_text("[project]\nname='selfbot'\n")
     (directory / "src" / "selfbot" / "__init__.py").write_text("")
-    (directory / "src" / "selfbot" / "feature.py").write_text(
-        f"VALUE = {marker!r}\n"
-    )
+    (directory / "src" / "selfbot" / "feature.py").write_text(f"VALUE = {marker!r}\n")
     return directory
 
 
@@ -46,6 +43,30 @@ def test_parse_github_branch_url_accepts_markdown_link() -> None:
     assert source.branch == "arena/01a0337b-selfbot"
     bracketed = parse_github_branch_url(f"[{BRANCH_URL}]")
     assert bracketed == source
+
+
+def test_parse_getcode_request_accepts_plain_and_formatted_input() -> None:
+    assert parse_getcode_request(f"{BRANCH_URL} Selfbot") == (
+        BRANCH_URL,
+        "Selfbot",
+    )
+    formatted = f"++**[{BRANCH_URL}]({BRANCH_URL}) OtherBot**++"
+    assert parse_getcode_request(formatted) == (BRANCH_URL, "OtherBot")
+
+
+@pytest.mark.parametrize(
+    "destination",
+    ["../OtherBot", "nested/OtherBot", "/tmp/bot", ".hidden", "two folders"],
+)
+def test_parse_getcode_request_rejects_unsafe_destination(destination: str) -> None:
+    with pytest.raises(ProjectUpdateError, match="Destination"):
+        parse_getcode_request(f"{BRANCH_URL} {destination}")
+
+
+def test_resolve_update_target_is_a_direct_child(tmp_path: Path) -> None:
+    assert resolve_update_target(tmp_path, "Selfbot") == tmp_path / "Selfbot"
+    with pytest.raises(ProjectUpdateError):
+        resolve_update_target(tmp_path, "../escape")
 
 
 @pytest.mark.parametrize(
@@ -72,6 +93,13 @@ def test_validate_checkout_checks_shape_and_python(tmp_path: Path) -> None:
     (checkout / "src" / "selfbot" / "broken.py").write_text("if !!!")
     with pytest.raises(ProjectUpdateError, match="Python validation failed"):
         _validate_checkout(checkout)
+
+
+def test_validate_checkout_accepts_another_python_bot_layout(tmp_path: Path) -> None:
+    checkout = tmp_path / "other-bot"
+    checkout.mkdir()
+    (checkout / "bot.py").write_text("print('ready')\n")
+    assert _validate_checkout(checkout)[0] == 1
 
 
 def test_validate_checkout_rejects_symlinks(tmp_path: Path) -> None:
@@ -138,7 +166,8 @@ async def test_getcode_command_updates_configured_project(
 ) -> None:
     import dataclasses
 
-    bot.config = dataclasses.replace(bot.config, project_update_dir=tmp_path / "deploy")
+    root = tmp_path / "deployments"
+    bot.config = dataclasses.replace(bot.config, project_update_root=root)
     calls: list[tuple[Path, str]] = []
 
     async def fake_update(self: ProjectUpdater, url: str) -> ProjectUpdateResult:
@@ -158,11 +187,11 @@ async def test_getcode_command_updates_configured_project(
 
     monkeypatch.setattr(ProjectUpdater, "update", fake_update)
     bot.edit = fake_edit
-    event = FakeEvent(raw_text=f"getcode {BRANCH_URL}")
+    event = FakeEvent(raw_text=f"getcode {BRANCH_URL} Selfbot")
 
     await registry.dispatch(bot, event, event.raw_text)
 
-    assert calls == [(tmp_path / "deploy", BRANCH_URL)]
+    assert calls == [(root / "Selfbot", BRANCH_URL)]
     assert bot.confirm_prompts and "Replace deployed project code" in bot.confirm_prompts[0]
     assert edits and "Project code updated" in edits[-1]
     assert "self restart" in edits[-1]
@@ -178,7 +207,7 @@ async def test_getcode_cancel_does_not_download(bot, registry, monkeypatch) -> N
 
     monkeypatch.setattr(ProjectUpdater, "update", fake_update)
     bot.confirm_result = False
-    event = FakeEvent(raw_text=f"getcode {BRANCH_URL}")
+    event = FakeEvent(raw_text=f"getcode {BRANCH_URL} Selfbot")
 
     await registry.dispatch(bot, event, event.raw_text)
 

@@ -162,7 +162,7 @@ class Config:
     max_file_size_mb: int
     temp_ttl_minutes: int
     plugins_dir: Path | None = None
-    project_update_dir: Path = Path("/home/selfnit4/self/public/Selfbot")
+    project_update_root: Path = Path("/home/selfnit4/self/public")
 
     # Populated lazily so tests can point them somewhere temporary.
     _dirs_created: bool = field(default=False, compare=False)
@@ -321,12 +321,17 @@ def load_config(
         if plugins_dir_raw
         else None
     )
-    project_update_dir = Path(
-        os.path.abspath(
-            Path(
-                _env("PROJECT_UPDATE_DIR", "/home/selfnit4/self/public/Selfbot")
-            ).expanduser()
+    project_update_root_raw = _env("PROJECT_UPDATE_ROOT")
+    if not project_update_root_raw:
+        # Backwards compatibility with the original single-destination updater.
+        legacy_update_dir = _env("PROJECT_UPDATE_DIR")
+        project_update_root_raw = (
+            str(Path(legacy_update_dir).expanduser().parent)
+            if legacy_update_dir
+            else "/home/selfnit4/self/public"
         )
+    project_update_root = Path(
+        os.path.abspath(Path(project_update_root_raw).expanduser())
     )
 
     return Config(
@@ -353,7 +358,7 @@ def load_config(
         max_file_size_mb=_env_int("MAX_FILE_SIZE_MB", 512) or 512,
         temp_ttl_minutes=_env_int("TEMP_TTL_MINUTES", 60) or 60,
         plugins_dir=plugins_dir,
-        project_update_dir=project_update_dir,
+        project_update_root=project_update_root,
     )
 
 

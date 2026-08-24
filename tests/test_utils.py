@@ -193,7 +193,13 @@ def test_load_config_requires_credentials(monkeypatch, tmp_path):
 
 
 def test_load_config_reads_env_file(monkeypatch, tmp_path):
-    for key in ("TELEGRAM_API_ID", "TELEGRAM_API_HASH", "SUDO_USER_ID"):
+    for key in (
+        "TELEGRAM_API_ID",
+        "TELEGRAM_API_HASH",
+        "SUDO_USER_ID",
+        "PROJECT_UPDATE_ROOT",
+        "PROJECT_UPDATE_DIR",
+    ):
         monkeypatch.delenv(key, raising=False)
 
     env = tmp_path / ".env"
@@ -204,7 +210,7 @@ def test_load_config_reads_env_file(monkeypatch, tmp_path):
         "export SUDO_USER_ID=999\n"
         "AI_COOLDOWN_SECONDS=10\n"
         f"DATA_DIR={tmp_path}\n"
-        f"PROJECT_UPDATE_DIR={tmp_path / 'deploy'}\n"
+        f"PROJECT_UPDATE_ROOT={tmp_path / 'deployments'}\n"
     )
 
     config = load_config(env_file=env)
@@ -212,7 +218,7 @@ def test_load_config_reads_env_file(monkeypatch, tmp_path):
     assert config.telegram.api_hash == "abcdef"
     assert config.sudo_user_id == 999
     assert config.ai.cooldown_seconds == 10
-    assert config.project_update_dir == tmp_path / "deploy"
+    assert config.project_update_root == tmp_path / "deployments"
 
 
 def test_config_describe_hides_secrets(config):
