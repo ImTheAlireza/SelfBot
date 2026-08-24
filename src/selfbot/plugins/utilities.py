@@ -32,8 +32,8 @@ COLOURS = {
     "qr",
     category=CATEGORY,
     min_args=1,
-    usage="qr <text> [--size N] [--fg colour] [--bg colour]",
-    examples=("qr https://example.com", "qr hello --size 14 --fg blue --bg white"),
+    usage="qr <text> [-size N] [-fg colour] [-bg colour]",
+    examples=("qr https://example.com", "qr hello -size 14 -fg blue -bg white"),
 )
 async def cmd_qr(ctx: Context) -> None:
     """Generate a QR code, optionally sized and coloured.
@@ -42,6 +42,9 @@ async def cmd_qr(ctx: Context) -> None:
     """
     import qrcode
 
+    ctx.require_single_dash_flags(
+        "-size", "-s", "-fg", "-foreground", "-bg", "-background"
+    )
     args = list(ctx.args)
     size, fg, bg = 10, "black", "white"
 

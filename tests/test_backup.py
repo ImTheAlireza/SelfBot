@@ -137,10 +137,10 @@ async def test_restore_validates_backup_version(bot, tmp_path) -> None:
 
     replied = _Replied(file=_File(name="bad.json"), _bytes=bad.read_bytes())
     event = FakeEvent(
-        raw_text="restore --force", is_reply=True, reply_message=replied
+        raw_text="restore -force", is_reply=True, reply_message=replied
     )
     bot.confirm_result = True
-    await bot.registry.dispatch(bot, event, "restore --force")
+    await bot.registry.dispatch(bot, event, "restore -force")
     assert any("version" in r.lower() or "unrecognised" in r.lower() for r in event.replies)
 
 

@@ -9,13 +9,15 @@ The :class:`AIManager` owns everything the ``gpt`` family of commands needs:
 * per-chat conversation memory (rolled out from here in phase 3),
 * live ``/models`` discovery for ``ai model list``.
 
-The low-level HTTP call shapes (URLs, headers, JSON bodies) are kept identical
-to the original ``plugins/ai.py`` implementation so existing behaviour and the
-tests that pin it continue to pass.
+The low-level HTTP layer handles both ordinary JSON completions and OpenAI-style
+SSE streams while keeping provider errors, fallback and cooldown behaviour
+consistent across gateways.
 """
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import time
 from collections.abc import Mapping, Sequence
@@ -37,8 +39,11 @@ __all__ = [
     "RAPIDAPI_HOST",
     "RAPIDAPI_MODEL",
     "SYSTEM_PROMPT",
+    "AIImage",
     "AIManager",
+    "CompletionResult",
     "ProviderStatus",
+    "extract_stream_answer",
     "seed_providers_from_env",
 ]
 
@@ -61,7 +66,6 @@ BACKUP_RAPIDAPI_GENERE = "ai-gf-1"
 
 #: HTTP statuses that mean "try the next provider" instead of "user error".
 _FALLBACK_STATUSES = frozenset({408, 429, 502, 503, 504})
-_COOLDOWN_BASE = 60.0
 _MODELS_CACHE_TTL = 600.0
 
 
@@ -71,6 +75,29 @@ class ProviderStatusError(ProviderError):
     def __init__(self, message: str, status: int) -> None:
         super().__init__(message)
         self.status = status
+
+
+@dataclass(frozen=True, slots=True)
+class AIImage:
+    """One prepared image attachment for an OpenAI multimodal message."""
+
+    data: bytes
+    mime_type: str
+
+    def content_part(self) -> dict[str, Any]:
+        encoded = base64.b64encode(self.data).decode("ascii")
+        return {
+            "type": "image_url",
+            "image_url": {"url": f"data:{self.mime_type};base64,{encoded}"},
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class CompletionResult:
+    """A completion plus the model identifier reported by the API response."""
+
+    text: str
+    reported_model: str = ""
 
 
 @dataclass(slots=True)
@@ -88,52 +115,238 @@ class ProviderStatus:
 async def openai_completion(
     http: Any,
     *,
-    messages: Sequence[Mapping[str, str]],
+    messages: Sequence[Mapping[str, Any]],
     api_key: str,
     base_url: str,
     model: str,
     timeout: float = 120.0,
-) -> str:
-    """Request a chat completion from an OpenAI-compatible endpoint."""
-    url = f"{base_url.rstrip('/')}/chat/completions"
-    response = await http.request(
-        "POST",
-        url,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": model,
-            "temperature": 1,
-            "messages": list(messages),
-        },
-        timeout=timeout,
-        # A retry after an uncertain timeout can duplicate a billable request.
-        retries=0,
-    )
+    temperature: float = 0.7,
+    max_tokens: int = 1000,
+) -> CompletionResult:
+    """Request an OpenAI-compatible completion, accepting JSON or SSE.
 
+    Streaming is requested because some compatible gateways document that as
+    their primary mode. The shared HTTP client buffers the finite response and
+    this function joins the SSE deltas before returning the final Telegram
+    message. If a gateway explicitly rejects the ``stream`` parameter, one
+    safe non-stream retry is made after the 4xx response.
+    """
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream, application/json",
+    }
+    body = {
+        "model": model,
+        "messages": list(messages),
+        "stream": True,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+
+    for stream in (True, False):
+        body["stream"] = stream
+        response = await http.request(
+            "POST",
+            url,
+            headers=headers,
+            json=dict(body),
+            timeout=timeout,
+            # A retry after an uncertain timeout can duplicate a billable request.
+            retries=0,
+        )
+        try:
+            return await _openai_response_result(response)
+        except ProviderStatusError as exc:
+            # Retry only when the server rejected streaming before generating a
+            # completion. Authentication, quota and upstream errors must not be
+            # repeated, and a malformed successful stream may already be billed.
+            if stream and _stream_parameter_rejected(exc):
+                logger.info("Provider rejected SSE streaming; retrying as JSON")
+                continue
+            raise
+
+    raise ProviderError("AI provider did not return a completion.")
+
+
+async def _openai_response_result(response: Any) -> CompletionResult:
+    """Decode one OpenAI response without trusting its Content-Type header."""
+    raw = ""
     try:
         payload = await response.json(content_type=None)
-    except Exception as exc:
-        raise ProviderStatusError(
-            f"Provider sent an invalid response (HTTP {response.status}).",
-            response.status,
-        ) from exc
+    except Exception:
+        try:
+            raw = await response.text()
+        except Exception:
+            raw = ""
+        payload = _json_body(raw)
 
-    if response.status >= 400:
+    status = int(getattr(response, "status", 0) or 0)
+    if status >= 400:
+        error_payload = payload if payload is not None else raw
         raise ProviderStatusError(
-            format_provider_error(payload, response.status, "AI provider"),
-            response.status,
+            format_provider_error(error_payload, status, "AI provider"), status
         )
 
     if isinstance(payload, Mapping) and payload.get("error"):
         raise ProviderStatusError(
-            format_provider_error(payload, response.status or 400, "AI provider"),
-            response.status or 400,
+            format_provider_error(payload, status or 400, "AI provider"),
+            status or 400,
         )
 
-    return extract_answer(payload, "AI provider")
+    # Some test doubles and permissive gateways return the SSE body as a JSON
+    # string. Detect it before treating it as an ordinary plain-text answer.
+    if isinstance(payload, str) and _looks_like_event_stream(payload):
+        return _extract_stream_result(payload)
+    if payload is not None:
+        return CompletionResult(
+            extract_answer(payload, "AI provider"),
+            _response_model(payload),
+        )
+    if _looks_like_event_stream(raw):
+        return _extract_stream_result(raw)
+
+    preview = raw.strip()[:160]
+    detail = f": {preview}" if preview else ""
+    raise ProviderStatusError(
+        f"AI provider sent an invalid response (HTTP {status}){detail}.",
+        status,
+    )
+
+
+def _json_body(raw: str) -> Any | None:
+    if not raw.strip():
+        return None
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _response_model(payload: Any) -> str:
+    if not isinstance(payload, Mapping):
+        return ""
+    model = payload.get("model")
+    return model.strip() if isinstance(model, str) else ""
+
+
+def _looks_like_event_stream(raw: str) -> bool:
+    stripped = raw.lstrip("\ufeff \t\r\n")
+    return stripped.startswith(("data:", "event:", ":"))
+
+
+def _stream_parameter_rejected(exc: ProviderStatusError) -> bool:
+    if exc.status not in {400, 415, 422}:
+        return False
+    message = str(exc).lower()
+    return "stream" in message and any(
+        word in message
+        for word in ("unsupported", "unknown", "invalid", "not allowed", "unrecognized")
+    )
+
+
+def extract_stream_answer(raw: str, provider: str = "AI provider") -> str:
+    """Join and return text deltas from an OpenAI-compatible SSE response."""
+    return _extract_stream_result(raw, provider).text
+
+
+def _extract_stream_result(
+    raw: str, provider: str = "AI provider"
+) -> CompletionResult:
+    """Decode SSE text while retaining its API-reported model identifier.
+
+    Handles standard ``data: {...}`` server-sent events, multi-line SSE data,
+    comment/metadata fields and newline-delimited JSON used by a few gateways.
+    Whitespace inside deltas is preserved so ``"Hello"`` + ``" world"`` does
+    not accidentally become ``"Helloworld"``.
+    """
+    pieces: list[str] = []
+    data_lines: list[str] = []
+    reported_model = ""
+
+    def consume(data: str) -> bool:
+        nonlocal reported_model
+        data = data.strip("\r\n")
+        if not data:
+            return False
+        if data.strip() == "[DONE]":
+            return True
+        try:
+            chunk = json.loads(data)
+        except (TypeError, ValueError):
+            # A few proxies emit a plain text delta after ``data:``.
+            pieces.append(data)
+            return False
+        if not isinstance(chunk, Mapping):
+            return False
+        if chunk.get("error"):
+            raise ProviderError(format_provider_error(chunk, 400, provider))
+        reported_model = _response_model(chunk) or reported_model
+        piece = _stream_chunk_text(chunk)
+        if piece:
+            pieces.append(piece)
+        return False
+
+    for raw_line in raw.lstrip("\ufeff").splitlines():
+        line = raw_line.rstrip("\r")
+        if not line:
+            if data_lines and consume("\n".join(data_lines)):
+                break
+            data_lines.clear()
+            continue
+        if line.startswith("data:"):
+            data_lines.append(line[5:].lstrip(" "))
+            continue
+        if line.startswith(("event:", "id:", "retry:", ":")):
+            continue
+        # Tolerate NDJSON in addition to strict SSE.
+        if (
+            not data_lines
+            and line.lstrip().startswith(("{", "["))
+            and consume(line.strip())
+        ):
+            break
+
+    if data_lines:
+        consume("\n".join(data_lines))
+
+    answer = "".join(pieces).strip()
+    if not answer:
+        raise ProviderError(f"{provider} returned an empty streamed completion.")
+    return CompletionResult(answer, reported_model)
+
+
+def _stream_chunk_text(chunk: Mapping[str, Any]) -> str:
+    choices = chunk.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    choice = choices[0]
+    if not isinstance(choice, Mapping):
+        return ""
+
+    delta = choice.get("delta")
+    if isinstance(delta, Mapping):
+        return _raw_content_text(delta.get("content"))
+    message = choice.get("message")
+    if isinstance(message, Mapping):
+        return _raw_content_text(message.get("content"))
+    text = choice.get("text")
+    return text if isinstance(text, str) else ""
+
+
+def _raw_content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    pieces: list[str] = []
+    for part in content:
+        if isinstance(part, str):
+            pieces.append(part)
+        elif isinstance(part, Mapping) and isinstance(part.get("text"), str):
+            pieces.append(part["text"])
+    return "".join(pieces)
 
 
 async def rapidapi_completion(http: Any, *, prompt: str, api_key: str) -> str:
@@ -289,7 +502,9 @@ def content_text(content: Any) -> str:
 def format_provider_error(payload: Any, status: int, provider: str) -> str:
     """Turn a provider error response into a short, actionable message."""
     detail = ""
-    if isinstance(payload, Mapping):
+    if isinstance(payload, str):
+        detail = payload.strip()
+    elif isinstance(payload, Mapping):
         error = payload.get("error")
         if isinstance(error, Mapping):
             for key in ("message", "detail", "error"):
@@ -339,7 +554,6 @@ class AIManager:
     def __init__(self, bot: Any) -> None:
         self.bot = bot
         self._cache: list[AIProvider] | None = None
-        self._consecutive_failures: dict[str, int] = {}
         self._models_cache: dict[str, tuple[float, list[str]]] = {}
 
     # -- providers --------------------------------------------------------
@@ -510,8 +724,10 @@ class AIManager:
         history: bool = False,
         model: str | None = None,
         system: str | None = None,
+        images: Sequence[AIImage] | None = None,
+        max_tokens: int | None = None,
     ) -> str:
-        messages: list[dict[str, str]] = [
+        messages: list[dict[str, Any]] = [
             {"role": "system", "content": system or SYSTEM_PROMPT}
         ]
         used_provider = ""
@@ -523,14 +739,22 @@ class AIManager:
             ):
                 messages.append({"role": stored.role, "content": stored.content})
 
-        messages.append({"role": "user", "content": prompt})
+        user_content: str | list[dict[str, Any]] = prompt
+        if images:
+            user_content = [
+                {"type": "text", "text": prompt},
+                *(image.content_part() for image in images),
+            ]
+        messages.append({"role": "user", "content": user_content})
         messages = _apply_budget(messages, self.config.memory_budget)
 
         metrics = getattr(self.bot, "metrics", None)
         if metrics is not None:
             metrics.incr("ai_requests")
         try:
-            answer = await self._complete_chain(messages, model=model)
+            answer = await self._complete_chain(
+                messages, model=model, max_tokens=max_tokens
+            )
         except Exception:
             if metrics is not None:
                 metrics.incr("ai_failures")
@@ -557,9 +781,10 @@ class AIManager:
 
     async def _complete_chain(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         model: str | None = None,
+        max_tokens: int | None = None,
     ) -> str:
         providers = await self._ordered_providers()
         if not providers:
@@ -572,6 +797,7 @@ class AIManager:
         errors: list[str] = []
         self._last_provider = ""
         self._last_model = ""
+        self._last_reported_model = ""
 
         for provider in providers:
             if not provider.api_key:
@@ -581,9 +807,14 @@ class AIManager:
                 continue
 
             use_model = model or provider.model or ""
+            if not use_model and provider.kind == "openai":
+                use_model = ANYAPI_DEFAULT_MODEL
             try:
-                answer = await self._call(
-                    provider, messages=messages, model=use_model
+                result = await self._call(
+                    provider,
+                    messages=messages,
+                    model=use_model,
+                    max_tokens=max_tokens,
                 )
             except ProviderStatusError as exc:
                 await self._record_failure(provider, exc, fallback=True)
@@ -597,10 +828,10 @@ class AIManager:
                 continue
 
             await self.db.record_provider_result(provider.name, success=True)
-            self._consecutive_failures.pop(provider.name, None)
             self._last_provider = provider.name
             self._last_model = use_model
-            return answer
+            self._last_reported_model = result.reported_model
+            return result.text
 
         detail = "; ".join(errors[-3:]) if errors else "no providers available"
         raise ProviderError(f"All AI providers are unavailable ({detail}).")
@@ -623,25 +854,35 @@ class AIManager:
         self,
         provider: AIProvider,
         *,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         model: str,
-    ) -> str:
+        max_tokens: int | None,
+    ) -> CompletionResult:
         if provider.kind in ("rapidapi", "rapidapi_backup"):
+            if _messages_have_images(messages):
+                raise ProviderError("This AI provider does not support image input.")
             prompt = next(
-                (m["content"] for m in reversed(messages) if m["role"] == "user"),
+                (
+                    _message_text(m.get("content"))
+                    for m in reversed(messages)
+                    if m["role"] == "user"
+                ),
                 "",
             )
-            return await rapidapi_completion(
+            answer = await rapidapi_completion(
                 self.http, prompt=prompt, api_key=provider.api_key
             )
-        if not model:
-            model = ANYAPI_DEFAULT_MODEL
+            return CompletionResult(answer)
+        routed_messages = _with_route_context(
+            messages, provider=provider.name, model=model
+        )
         return await openai_completion(
             self.http,
-            messages=messages,
+            messages=routed_messages,
             api_key=provider.api_key,
             base_url=provider.base_url,
             model=model,
+            max_tokens=max_tokens or 1000,
         )
 
     async def _in_cooldown(self, provider: AIProvider) -> bool:
@@ -669,10 +910,10 @@ class AIManager:
             provider.name, success=False, error=message
         )
         if fallback:
-            count = self._consecutive_failures.get(provider.name, 0) + 1
-            self._consecutive_failures[provider.name] = count
+            # A short fixed cooldown lets the provider recover without making
+            # every consecutive temporary failure wait exponentially longer.
             seconds = min(
-                _COOLDOWN_BASE * (2 ** (count - 1)),
+                float(self.config.cooldown_seconds),
                 float(self.config.cooldown_max),
             )
             until = utcnow().timestamp() + seconds
@@ -781,24 +1022,92 @@ class AIManager:
 # --------------------------------------------------------------------------
 
 
+def _with_route_context(
+    messages: Sequence[Mapping[str, Any]],
+    *,
+    provider: str,
+    model: str,
+) -> list[dict[str, Any]]:
+    """Tell the model which API route was requested without claiming proof.
+
+    Language models cannot reliably introspect their own deployment identity.
+    This runtime context makes identity answers report the selected API model
+    instead of guessing a vendor from training-time persona data.
+    """
+    routed = [dict(message) for message in messages]
+    context = (
+        "\n\nRuntime routing context: this application requested model identifier "
+        f"'{model}' through provider '{provider}'. You cannot independently "
+        "inspect the provider's underlying deployment. If asked which model "
+        "you are, report this requested API identifier and do not guess a "
+        "different vendor or model identity."
+    )
+    for message in routed:
+        if message.get("role") == "system":
+            message["content"] = message.get("content", "") + context
+            break
+    else:
+        routed.insert(0, {"role": "system", "content": context.lstrip()})
+    return routed
+
+
 def _dt_from_timestamp(ts: float) -> Any:
     from datetime import datetime, timezone
 
     return datetime.fromtimestamp(ts, tz=timezone.utc)
 
 
+def _message_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(
+        str(part.get("text", ""))
+        for part in content
+        if isinstance(part, Mapping) and part.get("type") == "text"
+    ).strip()
+
+
+def _messages_have_images(messages: Sequence[Mapping[str, Any]]) -> bool:
+    return any(
+        isinstance(message.get("content"), list)
+        and any(
+            isinstance(part, Mapping) and part.get("type") == "image_url"
+            for part in message["content"]
+        )
+        for message in messages
+    )
+
+
+def _content_budget_size(content: Any) -> int:
+    if isinstance(content, str):
+        return len(content)
+    if not isinstance(content, list):
+        return 0
+    size = len(_message_text(content))
+    # Reserve a modest token-equivalent budget for each visual input without
+    # counting the much larger base64 transport representation.
+    size += 4000 * sum(
+        1
+        for part in content
+        if isinstance(part, Mapping) and part.get("type") == "image_url"
+    )
+    return size
+
+
 def _apply_budget(
-    messages: list[dict[str, str]], budget: int
-) -> list[dict[str, str]]:
+    messages: list[dict[str, Any]], budget: int
+) -> list[dict[str, Any]]:
     """Drop the oldest non-system turns until the payload fits ``budget``."""
     if budget <= 0 or len(messages) <= 2:
         return messages
-    total = sum(len(m["content"]) for m in messages)
+    total = sum(_content_budget_size(m.get("content")) for m in messages)
     result = list(messages)
     while total > budget and len(result) > 2:
         # Index 1 is the oldest non-system message.
         removed = result.pop(1)
-        total -= len(removed["content"])
+        total -= _content_budget_size(removed.get("content"))
     return result
 
 

@@ -111,7 +111,7 @@ following the existing `%s`→`?` translation already in `db.py`.
   - Empty/legacy plaintext values decrypt transparently (if Fernet fails, treat
     as plaintext and re-encrypt on next write) so seeded rows migrate cleanly.
 - The key file is excluded from any backup export unless the operator passes
-  `--include-secrets`; otherwise provider entries are exported with redacted
+  `-include-secrets`; otherwise provider entries are exported with redacted
   keys (see §8).
 
 ---
@@ -256,8 +256,10 @@ For each provider row show:
    messages from the current chat via `client.iter_messages`, formats them as
    `<sender>: <text>`, and asks the model for a bullet summary.
 
-Options: `--lang en|fa` (output language; auto-detected default), `--brief`
-(3 bullets) / `--detailed` (paragraphs). Reuses the `AIManager` with
+Options: `-lang auto|en|fa`, `-length short|medium|detailed`,
+`-style bullets|paragraph|actions|meeting`, and `-focus "topic"`; `-brief` and
+`-detailed` remain shorthand. Long sources use section summaries followed by a
+final synthesis instead of silent truncation. Reuses the `AIManager` with
 `history=False` and a dedicated summarization system prompt so it does not
 pollute conversational memory.
 
@@ -270,18 +272,18 @@ cross-chat scraping), with filters:
 
 ```
 search <text>                      # substring in message text
-search --from <id|@username|me>    # sender filter
-search --since <YYYY-MM-DD>        # inclusive
-search --until <YYYY-MM-DD>        # inclusive
-search --type photo|video|voice|audio|file|sticker|gif|link
-search [filters] --limit <n>       # default 20, max 100
+search -from <id|@username|me>    # sender filter
+search -since <YYYY-MM-DD>        # inclusive
+search -until <YYYY-MM-DD>        # inclusive
+search -type photo|video|voice|audio|file|sticker|gif|link
+search [filters] -limit <n>       # default 20, max 100
 ```
 
 - Uses `client.iter_messages(chat_id, search=text, from_user=..., offset_date=...)`.
 - Media type maps to the same attributes used by `del` in `messaging.py`
   (`photo`, `video`, `voice`, `audio`, `document`, `sticker`, `gif`,
   `web_preview`).
-- Renders up to `--limit` results as: sender · date · snippet (truncated 120
+- Renders up to `-limit` results as: sender · date · snippet (truncated 120
   chars) · a `t.me/c/.../id` deep link where resolvable.
 - Date parsing is strict; bad dates raise `UsageError` with an example.
 - Empty result set returns an explicit "nothing found" message.
@@ -296,23 +298,23 @@ search [filters] --limit <n>       # default 20, max 100
 - `users`, `quick_replies`, `auto_replies`, `welcomes`, `channel_reactions`,
   `timers` (active only), `sticker_packs`, `app_settings`, `plugin_state`.
 - Providers are included but **API keys are redacted** by default
-  (`"sk-…"`); `backup --include-secrets` encrypts the whole archive instead (see
+  (`"sk-…"`); `backup -include-secrets` encrypts the whole archive instead (see
   below) and the secret key path is printed.
 - The JSON is written to a temp file and sent as a Telegram document with a
   timestamped filename `selfbot-backup-YYYYMMDD-HHMMSS.json`.
-- `backup --file <name>` re-uploads a previously stored copy from `DATA_DIR`.
+- `backup -file <name>` re-uploads a previously stored copy from `DATA_DIR`.
 
 **`restore`** (reply to a backup document):
 - Downloads to the temp workspace, validates `version` and top-level shape.
 - **Requires confirmation** via the existing `bot.confirm(...)` (and supports
-  `--force` to skip). Shows what will be overwritten.
+  `-force` to skip). Shows what will be overwritten.
 - Imports each table inside a best-effort per-section transaction; reports
   per-section counts (`quick_replies: 12 inserted`, `welcomes: 3 skipped`).
 - Does **not** overwrite existing provider API keys with redacted stubs.
 - Timers are restored as rows; the existing startup `restore_timers` then
   re-arms them on next restart (or we re-arm immediately for active ones).
 
-**Encryption for `--include-secrets`:** reuse the `SecretBox` to Fernet-encrypt
+**Encryption for `-include-secrets`:** reuse the `SecretBox` to Fernet-encrypt
 the JSON before sending, producing `selfbot-backup-*.enc`. The operator must
 keep `secret.key` to restore it. This avoids adding a password-KDF step for the
 default path while still protecting secrets on request.
@@ -402,7 +404,7 @@ The current "plugin system" only auto-imports modules inside the bundled
 - `plugin unload <name>` — unregister its commands; disable in state.
 - `plugin install <git-url|pypi-spec>` — clone via `git` (subprocess) into
   `DATA_DIR/plugins/` or `pip install` into the current environment; requires
-  an explicit `--trust` acknowledgement (third-party code runs as the user
+  an explicit `-trust` acknowledgement (third-party code runs as the user
   account). Logged loudly.
 
 ### Registry change
@@ -413,7 +415,7 @@ The current "plugin system" only auto-imports modules inside the bundled
 ### Security
 - External plugins run with **full account access** (they get the Telethon
   client). The `plugin install` flow prints a clear warning and requires
-  `--trust`; bundled plugins remain the default. `DATA_DIR/plugins/` is noted
+  `-trust`; bundled plugins remain the default. `DATA_DIR/plugins/` is noted
   in `.gitignore`.
 
 ---
@@ -447,10 +449,10 @@ fallback**, with a deprecation note). `config.describe()` gains AI/health lines.
 | `gptmemory <on\|off\|clear\|turns\|status>` | AI | authorized | **new** |
 | `aistatus [test <name>]` | AI | sudo | **new** |
 | `gptmodel <list\|set\|clear\|current>` | AI | sudo | **new** |
-| `summarize [n] [--lang] [--brief\|--detailed]` | AI | authorized | **new** |
+| `summarize [n] [-lang] [-length] [-style] [-focus]` | AI | authorized | **new** |
 | `search ...filters` | Messaging | authorized | **new** |
-| `backup [--include-secrets]` | Admin | sudo | **new** |
-| `restore [--force]` | Admin | sudo | **new** |
+| `backup [-include-secrets]` | Admin | sudo | **new** |
+| `restore [-force]` | Admin | sudo | **new** |
 | `health [metrics]` | Core | sudo | **new** |
 | `plugin <list\|enable\|disable\|load\|reload\|unload\|install>` | System | sudo | **new** |
 | `status` | Core | sudo | changed — AI one-liner |
@@ -564,11 +566,11 @@ broken state.
 | **Losing access after moving keys to DB** | Env vars still seed on first start; secret key path logged; backup warns to back up `secret.key`. |
 | **Memory blows prompt/token budget** | Character budget + rolling window + drop-oldest; system prompt pinned. |
 | **Provider `/models` endpoint varies** | `gptmodel list` degrades gracefully to configured models; never hard-fails. |
-| **External plugin executes untrusted code** | Opt-in `plugin install --trust`; disabled by default; loud warning; bundled plugins unaffected. |
+| **External plugin executes untrusted code** | Opt-in `plugin install -trust`; disabled by default; loud warning; bundled plugins unaffected. |
 | **MySQL/SQLite dialect drift** | All new DDL written in both dialects from the start, following existing pattern; tested on SQLite in CI. |
 | **Backward compat for `test_ai.py`** | Re-export legacy helpers as wrappers; behavior/error messages preserved. |
 | **Health endpoint exposure** | Binds `127.0.0.1` by default; off unless `HEALTH_PORT` set; no secrets in `/healthz`. |
-| **Large conversation/document inputs** | Hard caps (`--limit 100`, document size cap, char budget); clear errors. |
+| **Large conversation/document inputs** | Hard caps (`-limit 100`, document size cap, char budget); clear errors. |
 
 ---
 

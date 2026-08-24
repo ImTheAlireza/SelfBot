@@ -175,7 +175,8 @@ async def test_plugin_path_command(bot) -> None:
 async def test_plugin_install_requires_trust(bot) -> None:
     event = FakeEvent(raw_text="plugin install https://example.com/repo.git")
     await bot.registry.dispatch(bot, event, "plugin install https://example.com/repo.git")
-    assert any("`-trust`" in r or "-trust" in r for r in event.replies)
+    assert any("-trust" in reply for reply in event.replies)
+    assert all("--trust" not in reply for reply in event.replies)
 
 
 def test_plugin_meta_dataclass() -> None:

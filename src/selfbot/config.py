@@ -113,6 +113,7 @@ class AIConfig:
     bluesminds_model: str = ANYAPI_DEFAULT_MODEL
     memory_turns: int = 10
     memory_budget: int = 24000
+    cooldown_seconds: int = 10
     cooldown_max: int = 900
 
     @property
@@ -161,6 +162,7 @@ class Config:
     max_file_size_mb: int
     temp_ttl_minutes: int
     plugins_dir: Path | None = None
+    project_update_root: Path = Path("/home/selfnit4/self/public")
 
     # Populated lazily so tests can point them somewhere temporary.
     _dirs_created: bool = field(default=False, compare=False)
@@ -301,6 +303,9 @@ def load_config(
         memory_budget=max(
             1000, _env_int("AI_MEMORY_BUDGET", 24000) or 24000
         ),
+        cooldown_seconds=max(
+            0, _env_int("AI_COOLDOWN_SECONDS", 10) or 0
+        ),
         cooldown_max=max(0, _env_int("AI_COOLDOWN_MAX", 900) or 900),
     )
 
@@ -315,6 +320,18 @@ def load_config(
         Path(plugins_dir_raw).expanduser().resolve()
         if plugins_dir_raw
         else None
+    )
+    project_update_root_raw = _env("PROJECT_UPDATE_ROOT")
+    if not project_update_root_raw:
+        # Backwards compatibility with the original single-destination updater.
+        legacy_update_dir = _env("PROJECT_UPDATE_DIR")
+        project_update_root_raw = (
+            str(Path(legacy_update_dir).expanduser().parent)
+            if legacy_update_dir
+            else "/home/selfnit4/self/public"
+        )
+    project_update_root = Path(
+        os.path.abspath(Path(project_update_root_raw).expanduser())
     )
 
     return Config(
@@ -341,6 +358,7 @@ def load_config(
         max_file_size_mb=_env_int("MAX_FILE_SIZE_MB", 512) or 512,
         temp_ttl_minutes=_env_int("TEMP_TTL_MINUTES", 60) or 60,
         plugins_dir=plugins_dir,
+        project_update_root=project_update_root,
     )
 
 

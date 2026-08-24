@@ -20,13 +20,13 @@
 
 ## What it does
 
-57 commands across AI, file manipulation, timers, stickers, QR codes, weather,
+59 commands across AI, file manipulation, timers, stickers, QR codes, weather,
 dictionaries, search, backups and chat automation — all driven from your own
 Telegram account by typing commands into any chat.
 
 | | |
 |---|---|
-| 🧠 **AI** | Ask any OpenAI-compatible model with `gpt`, with per-chat memory, reply/edit mode, summarization, model selection and provider management. |
+| 🧠 **AI** | Ask any OpenAI-compatible model with `gpt`, including image replies for vision models, per-chat memory, summarization, model selection and provider management. |
 | 📁 **Files** | Zip/unzip with AES passwords, batch queues, rename, audio tag editing, PDF page extraction. |
 | ⏰ **Timers** | Live-updating countdowns that survive restarts. |
 | 🎨 **Stickers** | Render text to stickers and manage packs via a helper bot. |
@@ -94,6 +94,7 @@ Telegram, storage, logging, and process settings are environment-driven. See
 | `ANYAPI_KEY` / `BLUESMINDS_API_KEY` / `RAPIDAPI_KEY` | | — | AI keys seeded into the DB on first run; managed afterward via `ai` |
 | `HEALTH_PORT` / `HEALTH_BIND` | | disabled / `127.0.0.1` | Enable the `/healthz` HTTP endpoint |
 | `PLUGINS_DIR` | | `DATA_DIR/plugins` | Directory for external plugins |
+| `PROJECT_UPDATE_ROOT` | | `/home/selfnit4/self/public` | Parent directory containing deployments managed by `getcode` |
 | `SUPERVISOR_PROCESS` | | `selfbot` | Enables supervisor-backed status and logs |
 | `MAX_FILE_SIZE_MB` | | `512` | Ceiling on downloads and uploads |
 
@@ -114,7 +115,9 @@ Tables are created automatically on first run.
 ## Commands
 
 Commands are typed as plain messages from your own account. Set
-`COMMAND_PREFIX=.` if you'd rather write `.help`.
+`COMMAND_PREFIX=.` if you'd rather write `.help`. Every Telegram command flag
+uses exactly one dash (`-lang`, `-here`, `-force`); double-dash forms are
+rejected with the correct spelling.
 
 ### Core
 | Command | Description |
@@ -125,11 +128,21 @@ Commands are typed as plain messages from your own account. Set
 | `status` | Uptime and runtime counters |
 | `health [metrics]` | 👑 Tasks, memory, DB, AI and recent API failures |
 | `self on\|off\|restart\|status\|logs\|diag` | 👑 Process control and supervisor troubleshooting |
+| `getcode <GitHub branch URL> <folder>` | 👑 Validate and overwrite one deployment under `PROJECT_UPDATE_ROOT` |
 | `plugin list\|load\|reload\|unload\|enable\|disable\|install\|path` | 👑 Manage external plugins |
 
 `self restart` directly replaces the current Python process while preserving
 its PID and environment. It deliberately does not call `supervisorctl restart`,
 which can deadlock when invoked by the process being restarted.
+
+`getcode` accepts an HTTPS GitHub `/tree/<branch>` URL plus one safe destination
+folder and asks for an in-chat confirmation. For example, `getcode <url>
+Selfbot` updates `/home/selfnit4/self/public/Selfbot`; `getcode <url> OtherBot`
+updates the sibling `OtherBot` deployment. It downloads into a sibling staging
+directory, validates project structure, size, symlinks and Python syntax, then
+transactionally replaces that folder's code. Path traversal is rejected. Stale
+code is removed; `.env`, `data`, virtualenvs, session files and logs are
+preserved. Restart the corresponding process afterward to load the snapshot.
 
 ### Admin 👑
 | Command | Description |
@@ -143,9 +156,9 @@ which can deadlock when invoked by the process being restarted.
 ### AI — 4 commands
 | Command | Description |
 |---|---|
-| `gpt <prompt>` | Ask the active model. Reply to a message to feed it as context. Reply with `gpt edit [instruction]` to rewrite one of **your own** messages in place. |
+| `gpt <prompt>` | Ask the active model. Reply to text or an image to include it as context for a vision-capable model. Reply with `gpt edit [instruction]` to rewrite one of **your own** messages in place. |
 | `memory on\|off\|clear\|turns <n>\|status` | Per-chat conversation memory |
-| `summarize [n] [-lang en\|fa] [-brief\|-detailed]` | Summarize a replied message, document or last `n` messages |
+| `summarize [n] [-lang auto\|en\|fa] [-length short\|medium\|detailed] [-style bullets\|paragraph\|actions\|meeting] [-focus "topic"]` | Summarize replied content or recent messages |
 | `ai [add\|remove\|default\|enable\|disable\|test\|model\|status]` | 👑 Manage providers and the active model — the **only** place to do so |
 
 There is exactly **one** chat command (`gpt`) and **one** management command
@@ -153,6 +166,7 @@ There is exactly **one** chat command (`gpt`) and **one** management command
 
 ```
 ai add https://api.openai.com/v1 sk-your-key gpt-4o-mini
+ai add bai https://api.b.ai/v1 sk-your-key gpt-5.2
 ai default openai
 ai              # status: active model + all providers
 ai model        # show active model
@@ -161,10 +175,28 @@ ai model luna   # set model on the default provider
 ```
 
 Providers and API keys are stored **in the database** (encrypted at rest),
-not in `.env`. Keys still present in `ANYAPI_KEY` / `BLUESMINDS_API_KEY` /
-`RAPIDAPI_KEY` are seeded automatically on first start. When a provider
-returns a quota/rate-limit error it is temporarily skipped with exponential
-back-off; `ai` shows who is cooling down.
+not in `.env`; the `ai add` message containing the plaintext key is deleted
+automatically. Both ordinary OpenAI JSON responses and streamed SSE deltas are
+supported. A copied full endpoint such as `/v1/chat/completions` is normalized
+to its base URL automatically. GPT response footers distinguish the requested
+model from a different model identifier reported by the API. Keys still present in `ANYAPI_KEY` /
+`BLUESMINDS_API_KEY` / `RAPIDAPI_KEY` are seeded automatically on first start.
+When a provider returns a temporary quota/rate-limit error it is skipped for a
+fixed 10 seconds by default (`AI_COOLDOWN_SECONDS`); `ai` shows who is cooling
+down. Model `<think>`, `<thinking>` and `<reasoning>` blocks are displayed as a
+separate Telegram quote, and the provider/model footer is always italic. Image
+replies and up to four visual messages in a conversation summary are sent using
+OpenAI-compatible multimodal `image_url` content. Static image stickers are
+converted to PNG/JPEG; TGS/video stickers are reported as unsupported.
+Long summary sources are processed section-by-section and synthesized instead
+of being silently truncated; the guarded maximum is 240,000 characters.
+`-brief` and `-detailed` remain shorthand for `-length short` and
+`-length detailed`. Text, Markdown, CSV, JSON, HTML, DOCX and text-based PDFs
+are extracted locally; unsupported binary documents are rejected instead of
+being decoded into garbage text. Conversation summaries label each source as
+`[M1]`, `[M2]`, etc., preserve UTC timestamps and speaker names, and ask the
+model to cite those markers. An italic footer reports source size, message/image
+counts, processing sections and the model route used.
 
 ### Messaging
 | Command | Description |
@@ -172,6 +204,7 @@ back-off; `ai` shows who is cooling down.
 | `spam <message> <count>` | Repeat a message, rate-limit aware |
 | `cancel` | Stop your running spam task |
 | `del <count\|type> [-me]` | 👑 Delete messages in the current chat; `-me` limits it to yours |
+| `delto [-me]` | 👑 Reply to a message and delete from the command back through it, without confirmation |
 | `info [user]` | User details and profile photo (reply, mention, or yourself) |
 | `qreply set\|remove\|list\|info` | Manage `-alias` shortcuts |
 | `-<alias>` | Expand a quick reply in place |
@@ -181,6 +214,11 @@ back-off; `ai` shows who is cooling down.
 select another chat. Without `-me`, it targets messages from everyone that your
 account is allowed to delete. Append `-me` to target only your messages, for
 example `del 400 -me`, `del photos -me`, or `del all -me`.
+
+`delto` is intentionally immediate: reply to the oldest message that should be
+removed and send `delto`; it deletes every message from the command back through
+the replied message, inclusive, without confirmation. Use `delto -me` to delete
+only your own messages inside that range.
 
 Types: `photos`, `videos`, `voices`, `videomsgs`, `musics`, `files`, `stickers`,
 `gifs`, `links`, `all`.
@@ -306,7 +344,7 @@ Manage them in chat: `plugin list`, `plugin load <path>`, `plugin reload <name>`
 ```bash
 pip install -e ".[dev,full]"
 
-pytest                      # 434 tests
+pytest                      # 491 tests
 pytest --cov=selfbot        # with coverage
 ruff check src tests        # lint
 mypy src/selfbot            # type check

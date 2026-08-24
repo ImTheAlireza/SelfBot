@@ -51,11 +51,6 @@ _VALUE_FLAGS = {
 }
 _BOOL_FLAGS = {"-here", "-global", "-ungrouped", "-regex", "-exact"}
 
-# Accept the old double-dash forms transparently so muscle memory keeps
-# working: --from -> -from, --here -> -here, etc.
-# No aliases: all flags use a single dash (e.g. -from, -here).
-_ALIASES: dict[str, str] = {}
-
 # Per-user active run / page / progress / task state.
 _active: dict[int, SearchRun] = {}
 _pages: dict[int, int] = {}
@@ -74,7 +69,7 @@ def _parse_args(args: list[str]) -> tuple[list[str], dict[str, str], set[str]]:
     booleans: set[str] = set()
     index = 0
     while index < len(args):
-        token = _ALIASES.get(args[index], args[index])
+        token = args[index]
         if token in _VALUE_FLAGS:
             if index + 1 >= len(args):
                 nice = token.lstrip("-")
@@ -157,6 +152,7 @@ def _build_query(args: list[str], *, chat_id: int) -> SearchQuery:
 )
 async def cmd_search(ctx: Context) -> None:
     """Search messages across your account (or this chat with -here)."""
+    ctx.require_single_dash_flags(*_VALUE_FLAGS, *_BOOL_FLAGS)
     sub = ctx.args[0].lower() if ctx.args else ""
 
     if sub == "more":

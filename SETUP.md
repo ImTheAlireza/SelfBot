@@ -104,7 +104,7 @@ python -m selfbot --check
 Expected:
 
 ```
-✅ Configuration valid — 43 commands registered.
+✅ Configuration valid — 59 commands registered.
 
 session      : ./data/selfbot
 database     : sqlite+aiosqlite:///./data/selfbot.db

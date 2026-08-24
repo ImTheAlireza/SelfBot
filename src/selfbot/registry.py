@@ -80,6 +80,24 @@ class Context:
     def arg(self, index: int, default: str | None = None) -> str | None:
         return self.args[index] if index < len(self.args) else default
 
+    def require_single_dash_flags(self, *flags: str) -> None:
+        """Reject double-dash spellings of this command's known flags.
+
+        Telegram commands consistently use readable single-dash flags such as
+        ``-lang`` and ``-include-secrets``. Only known flags are checked so free
+        text arguments containing something like ``--example`` remain valid.
+        """
+        known = {flag.lower() for flag in flags}
+        for token in self.args:
+            lowered = token.lower()
+            if not lowered.startswith("--") or len(lowered) <= 2:
+                continue
+            suggested = f"-{lowered[2:]}"
+            if suggested in known:
+                raise UsageError(
+                    f"Flags use one dash. Use `{suggested}` instead of `{token}`."
+                )
+
 
 Handler = Callable[[Context], Awaitable[Any]]
 

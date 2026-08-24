@@ -37,10 +37,11 @@ BACKUP_SECTIONS = (
     "backup",
     category=CATEGORY,
     sudo_only=True,
-    usage="backup [--include-secrets] [--file <name>]",
+    usage="backup [-include-secrets] [-file <name>]",
 )
 async def cmd_backup(ctx: Context) -> None:
     """Export bot data as a JSON document (provider keys redacted by default)."""
+    ctx.require_single_dash_flags("-include-secrets", "-file")
     include_secrets = "-include-secrets" in ctx.args
     file_flag = "-file" in ctx.args
     filename = None
@@ -69,7 +70,7 @@ async def cmd_backup(ctx: Context) -> None:
         caption = (
             f"💾 **Backup** · v{BACKUP_VERSION}\n"
             f"Sections: {', '.join(BACKUP_SECTIONS)}\n"
-            "Provider API keys were redacted. Use `--include-secrets` to "
+            "Provider API keys were redacted. Use `-include-secrets` to "
             "include them (the file is encrypted)."
         )
 
@@ -89,10 +90,11 @@ async def cmd_backup(ctx: Context) -> None:
     category=CATEGORY,
     sudo_only=True,
     requires_reply=True,
-    usage="restore [--force]",
+    usage="restore [-force]",
 )
 async def cmd_restore(ctx: Context) -> None:
     """Restore data from a backup document (reply to the file)."""
+    ctx.require_single_dash_flags("-force")
     force = "-force" in ctx.args
     replied = await ctx.get_reply_message()
     if not replied or not (replied.document or replied.file):

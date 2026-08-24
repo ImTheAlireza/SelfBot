@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,14 @@ class _Sender:
     id: int = 4242
 
 
+def _png_bytes() -> bytes:
+    from PIL import Image
+
+    output = BytesIO()
+    Image.new("RGB", (2, 2), "red").save(output, "PNG")
+    return output.getvalue()
+
+
 @dataclass
 class _Replied:
     raw_text: str
@@ -45,10 +54,20 @@ class _Replied:
     id: int = 555
     photo: Any = None
     document: Any = None
+    sticker: Any = None
+    file: Any = None
+    media_bytes: bytes = b""
     edits: list[str] = field(default_factory=list)
 
     async def get_sender(self) -> _Sender:
         return _Sender()
+
+    async def download_media(self, *, file: Any) -> Any:
+        if file is bytes:
+            return self.media_bytes
+        path = Path(file) / "media.bin"
+        path.write_bytes(self.media_bytes)
+        return str(path)
 
     async def edit(self, text: str, **_kw: Any) -> _Replied:
         self.edits.append(text)
@@ -100,6 +119,58 @@ async def test_gpt_reply_includes_quoted_message(bot) -> None:
     user_content = next(m["content"] for m in request if m["role"] == "user")
     assert "the quoted message" in user_content
     assert "translate this" in user_content
+
+
+async def test_gpt_reply_sends_image_to_vision_model(bot) -> None:
+    from selfbot.plugins.ai import get_manager
+
+    await bot.db.add_provider(
+        "vision", "https://vision.example/v1", "sk-test", model="vision-model", is_default=True
+    )
+    manager = get_manager(type("C", (), {"bot": bot})())
+    bot.ai = manager
+    bot.http = _Http(answer="I see a red square")
+    replied = _Replied(raw_text="", photo=object(), media_bytes=_png_bytes())
+    event = FakeEvent(
+        raw_text="gpt describe this image",
+        is_reply=True,
+        reply_message=replied,
+    )
+
+    await bot.registry.dispatch(bot, event, event.raw_text)
+
+    content = bot.http.calls[0]["json"]["messages"][-1]["content"]
+    assert isinstance(content, list)
+    assert content[0] == {"type": "text", "text": "describe this image"}
+    assert content[1]["type"] == "image_url"
+    assert content[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+    assert any("I see a red square" in reply for reply in event.replies)
+
+
+def test_ai_response_formats_thinking_and_italic_footer() -> None:
+    from selfbot.plugins.ai import _format_ai_response
+
+    rendered = _format_ai_response(
+        "&lt;think&gt;Check the **details**.&lt;/think&gt;\nHello!",
+        provider="jasper",
+        requested_model="ox-alpha",
+        reported_model="x-preview-f-free",
+    )
+
+    assert "<b>💭 Thinking</b>" in rendered
+    assert "<blockquote expandable>" in rendered
+    assert "Check the <strong>details</strong>." in rendered
+    assert "Hello!" in rendered
+    assert "<i>— via jasper · requested ox-alpha" in rendered
+    assert "API reported x-preview-f-free" in rendered
+    assert rendered.endswith("</i>")
+
+    from telethon.extensions import html
+
+    _plain, entities = html.parse(rendered)
+    blockquote = next(entity for entity in entities if type(entity).__name__ == "MessageEntityBlockquote")
+    assert blockquote.collapsed is True
+    assert any(type(entity).__name__ == "MessageEntityItalic" for entity in entities)
 
 
 # --------------------------------------------------------------------------
@@ -154,10 +225,124 @@ async def test_summarize_replied_text(bot) -> None:
     assert stored == 0
 
 
+async def test_summarize_sends_static_sticker_to_vision_model(bot) -> None:
+    from selfbot.plugins.ai import get_manager
+
+    await bot.db.add_provider(
+        "vision", "https://vision.example/v1", "sk-test", model="vision-model", is_default=True
+    )
+    manager = get_manager(type("C", (), {"bot": bot})())
+    bot.ai = manager
+    bot.http = _Http(answer="A red sticker")
+    replied = _Replied(
+        raw_text="",
+        document=object(),
+        sticker=object(),
+        media_bytes=_png_bytes(),
+    )
+    event = FakeEvent(
+        raw_text="summarize",
+        is_reply=True,
+        reply_message=replied,
+    )
+
+    await bot.registry.dispatch(bot, event, event.raw_text)
+
+    content = bot.http.calls[0]["json"]["messages"][-1]["content"]
+    assert isinstance(content, list)
+    assert any(part.get("type") == "image_url" for part in content)
+    text_part = next(part["text"] for part in content if part.get("type") == "text")
+    assert "static sticker" in text_part
+    assert any("A red sticker" in reply for reply in event.replies)
+
+
 async def test_summarize_requires_reply_or_count(bot) -> None:
     event = FakeEvent(raw_text="summarize")
     await bot.registry.dispatch(bot, event, event.raw_text)
     assert any("Reply to" in r for r in event.replies)
+
+
+async def test_summarize_accepts_single_dash_flags(bot) -> None:
+    from selfbot.plugins.ai import get_manager
+
+    await bot.db.add_provider(
+        "summary", "https://summary.example/v1", "sk-test", model="summary-model", is_default=True
+    )
+    manager = get_manager(type("C", (), {"bot": bot})())
+    bot.ai = manager
+    bot.http = _Http(answer="خلاصه")
+    replied = _Replied(raw_text="A message to summarize.")
+    event = FakeEvent(
+        raw_text="summarize -lang fa -brief",
+        is_reply=True,
+        reply_message=replied,
+    )
+
+    await bot.registry.dispatch(bot, event, event.raw_text)
+
+    assert any("خلاصه" in reply for reply in event.replies)
+    request = bot.http.calls[0]["json"]
+    prompt = request["messages"][-1]["content"]
+    assert "Respond in Persian" in prompt
+    assert "very short" in prompt
+    assert "clear bullet points" in prompt
+    assert request["max_tokens"] == 600
+
+
+async def test_summarize_actions_style_and_focus(bot) -> None:
+    from selfbot.plugins.ai import get_manager
+
+    await bot.db.add_provider(
+        "summary", "https://summary.example/v1", "sk-test", model="summary-model", is_default=True
+    )
+    manager = get_manager(type("C", (), {"bot": bot})())
+    bot.ai = manager
+    bot.http = _Http(answer="Action summary")
+    replied = _Replied(raw_text="Alice owns deployment by Friday.")
+    event = FakeEvent(
+        raw_text='summarize -style actions -focus "owners and deadlines" -length detailed',
+        is_reply=True,
+        reply_message=replied,
+    )
+
+    await bot.registry.dispatch(bot, event, event.raw_text)
+
+    request = bot.http.calls[0]["json"]
+    prompt = request["messages"][-1]["content"]
+    assert "action items, owners, deadlines" in prompt
+    assert "owners and deadlines" in prompt
+    assert request["max_tokens"] == 1800
+
+
+async def test_summarize_long_source_uses_map_reduce_without_truncating(bot) -> None:
+    from selfbot.plugins.ai import get_manager
+
+    await bot.db.add_provider(
+        "summary", "https://summary.example/v1", "sk-test", model="summary-model", is_default=True
+    )
+    manager = get_manager(type("C", (), {"bot": bot})())
+    bot.ai = manager
+    bot.http = _Http(answer="section notes")
+    source = ("A" * 25_000) + " FINAL-MARKER"
+    replied = _Replied(raw_text=source)
+    event = FakeEvent(
+        raw_text="summarize -length medium",
+        is_reply=True,
+        reply_message=replied,
+    )
+
+    await bot.registry.dispatch(bot, event, event.raw_text)
+
+    # 3 source chunks plus one synthesis request.
+    assert len(bot.http.calls) == 4
+    chunk_prompts = [
+        call["json"]["messages"][-1]["content"]
+        for call in bot.http.calls[:-1]
+    ]
+    assert any("FINAL-MARKER" in prompt for prompt in chunk_prompts)
+    final_prompt = bot.http.calls[-1]["json"]["messages"][-1]["content"]
+    assert "Section 1 notes" in final_prompt
+    assert bot.http.calls[-1]["json"]["max_tokens"] == 1100
 
 
 async def test_summarize_conversation(bot) -> None:
@@ -186,11 +371,80 @@ async def test_summarize_conversation(bot) -> None:
     assert any("Conv summary" in r for r in event.replies)
     content = bot.http.calls[0]["json"]["messages"][-1]["content"]
     assert "one" in content and "three" in content
+    assert "[M1 | unknown time | Tester]" in content
+    assert "Cite important claims with their [M#]" in content
+    assert "3 messages" in event.replies[-1]
+    assert event.replies[-1].endswith("</i>")
 
 
-def test_extract_pdf_and_text(tmp_path: Path) -> None:
+async def test_summarize_conversation_maps_visuals_to_message_references(bot) -> None:
+    from selfbot.plugins.ai import get_manager
+
+    await bot.db.add_provider(
+        "summary", "https://summary.example/v1", "sk-test", model="vision-model", is_default=True
+    )
+    manager = get_manager(type("C", (), {"bot": bot})())
+    bot.ai = manager
+    bot.http = _Http(answer="Grounded summary [M2]")
+
+    class Message:
+        def __init__(self, text: str, *, photo: bool = False) -> None:
+            self.raw_text = text
+            self.photo = object() if photo else None
+            self.document = None
+            self.sticker = None
+
+        async def get_sender(self) -> _Sender:
+            return _Sender()
+
+        async def download_media(self, *, file: Any) -> bytes:
+            return _png_bytes()
+
+    # Telegram iterates newest first; the summary source must become chronological.
+    messages = [Message("new image", photo=True), Message("older text")]
+
+    async def iter_messages(chat_id, limit):
+        for message in messages[:limit]:
+            yield message
+
+    bot.client.iter_messages = iter_messages
+    event = FakeEvent(raw_text="summarize 2")
+    await bot.registry.dispatch(bot, event, event.raw_text)
+
+    content = bot.http.calls[0]["json"]["messages"][-1]["content"]
+    assert isinstance(content, list)
+    text = content[0]["text"]
+    assert "[M1 | unknown time | Tester] older text" in text
+    assert "[M2 | unknown time | Tester] new image [attached image I1]" in text
+    assert content[1]["type"] == "image_url"
+    assert "2 messages" in event.replies[-1]
+    assert "1 image" in event.replies[-1]
+
+
+def test_extract_text_html_docx_and_reject_binary(tmp_path: Path) -> None:
+    import zipfile
+
     from selfbot.plugins.ai import _extract_document_text
 
     txt = tmp_path / "note.txt"
     txt.write_text("hello world", encoding="utf-8")
     assert _extract_document_text(txt) == "hello world"
+
+    html = tmp_path / "page.html"
+    html.write_text("<h1>Title</h1><p>Useful text</p>", encoding="utf-8")
+    assert _extract_document_text(html) == "Title\nUseful text"
+
+    docx = tmp_path / "notes.docx"
+    document_xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        "<w:body><w:p><w:r><w:t>First paragraph</w:t></w:r></w:p>"
+        "<w:p><w:r><w:t>Second paragraph</w:t></w:r></w:p></w:body></w:document>"
+    )
+    with zipfile.ZipFile(docx, "w") as archive:
+        archive.writestr("word/document.xml", document_xml)
+    assert _extract_document_text(docx) == "First paragraph\nSecond paragraph"
+
+    binary = tmp_path / "archive.zip"
+    binary.write_bytes(b"\x00\xffnot text")
+    assert _extract_document_text(binary) == ""

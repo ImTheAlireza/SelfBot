@@ -39,7 +39,7 @@ def _manager(ctx: Context) -> Any:
         "plugin list",
         "plugin load /tmp/myplugin.py",
         "plugin reload myplugin",
-        "plugin install https://github.com/you/repo --trust",
+        "plugin install https://github.com/you/repo -trust",
     ),
 )
 async def cmd_plugin(ctx: Context) -> None:
@@ -221,10 +221,11 @@ def _looks_like_plugin(path: Path) -> bool:
 
 
 async def _install(ctx: Context, manager: Any) -> None:
+    ctx.require_single_dash_flags("-trust")
     args = ctx.args[1:]
     if not args:
         raise UsageError(
-            "Usage: `plugin install <git-url|pypi-spec> --trust`"
+            "Usage: `plugin install <git-url|pypi-spec> -trust`"
         )
     if "-trust" not in args:
         raise ValidationError(
