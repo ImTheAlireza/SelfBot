@@ -23,6 +23,7 @@ BACKUP_SECTIONS = (
     "channel_reactions",
     "quick_replies",
     "auto_replies",
+    "delete_filters",
     "welcomes",
     "timers",
     "sticker_packs",
@@ -213,6 +214,19 @@ async def _import_dump(ctx: Context, data: dict[str, Any]) -> dict[str, int]:
         except Exception:
             logger.debug("Could not import auto reply %s", row, exc_info=True)
 
+    # Delete filters
+    for row in data.get("delete_filters", []) or []:
+        try:
+            await db.add_delete_filter(
+                int(row["chat_id"]),
+                row["pattern"],
+                exact=bool(row.get("exact")),
+                created_by=row.get("created_by"),
+            )
+            counts["delete_filters"] += 1
+        except Exception:
+            logger.debug("Could not import delete filter %s", row, exc_info=True)
+
     # Welcomes
     for row in data.get("welcomes", []) or []:
         try:
@@ -318,6 +332,7 @@ async def _import_dump(ctx: Context, data: dict[str, Any]) -> dict[str, int]:
     if getattr(ctx.bot, "ai", None) is not None:
         ctx.bot.ai.invalidate()
     ctx.bot.invalidate_auto_reply_cache(None)
+    ctx.bot.invalidate_filter_cache(None)
     ctx.bot.invalidate_reaction_cache()
 
     return counts

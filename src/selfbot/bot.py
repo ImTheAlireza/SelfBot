@@ -111,6 +111,7 @@ class SelfBot:
         self.pending_confirmations: dict[tuple[int, int], asyncio.Future[bool]] = {}
 
         self._auto_reply_cache: dict[int, list[Any]] = {}
+        self._filter_cache: dict[int, list[Any]] = {}
         self._reaction_cache: dict[str, str] = {}
         self._reaction_cache_at = 0.0
         self._recent_welcomes: dict[tuple[int, int], float] = {}
@@ -458,6 +459,19 @@ class SelfBot:
             if answer in {"no", "n", "cancel", "stop"}:
                 future.set_result(False)
                 return
+
+        # Per-chat auto-delete filters run on every new message, from anyone.
+        # The checker itself skips the owner's command messages; when it
+        # deletes a message we stop processing it entirely.
+        try:
+            from .plugins.filters import delete_if_filtered
+
+            if await delete_if_filtered(self, event, text):
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Unhandled error while applying delete filters")
 
         if (
             is_own
@@ -966,6 +980,12 @@ class SelfBot:
             self._auto_reply_cache.clear()
         else:
             self._auto_reply_cache.pop(chat_id, None)
+
+    def invalidate_filter_cache(self, chat_id: int | None = None) -> None:
+        if chat_id is None:
+            self._filter_cache.clear()
+        else:
+            self._filter_cache.pop(chat_id, None)
 
     def invalidate_reaction_cache(self) -> None:
         self._reaction_cache_at = 0.0
