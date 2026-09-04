@@ -1,15 +1,16 @@
-"""Auto-delete filters and reply-scoped history deletion.
+"""Auto-delete filters and match-scoped history deletion.
 
-Reply to a message and send ``filter`` to save its text as a delete filter for
-THIS chat only: from then on, every new message from anyone whose text matches
-the saved pattern is deleted automatically. ``filter -after`` / ``filter
--before`` are one-shot wipes of the replied message plus everything after or
-before it in the same chat.
+Reply to a message and send ``filter`` (or ``filter -after``) to save its text
+as a delete filter for THIS chat only: from then on, every NEW message from
+anyone whose text contains the saved pattern is deleted automatically.
+``filter -before`` is retroactive: it scans this chat and deletes every
+EXISTING message whose text matches the replied message — contains by
+default, identical only with ``-exact``. Non-matching messages are never
+touched.
 
 Filters are always scoped to the chat they were created in (``-here`` is
 accepted as an explicit reminder of that and does nothing). Matching is
-case-insensitive and defaults to "contains"; ``-exact`` stores a filter that
-only fires on whole-message matches.
+case-insensitive; ``-exact`` switches to whole-message equality.
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ DELETE_BATCH = 100
 #: Flags understood by `filter`, in the order they appear in help text.
 FLAGS = ("-after", "-before", "-clear", "-exact", "-here", "-list", "-off")
 
-USAGE = "`filter [-after | -before | -list | -clear | -off <text>] [-exact]`"
+USAGE = "`filter [-after | -before] [-exact]` · `filter -list` · `filter -clear` · `filter -off <text>`"
 
 
 # ---------------------------------------------------------------------------
@@ -57,15 +58,24 @@ async def chat_filters(bot: object, chat_id: int) -> list[object]:
     return rules
 
 
+def text_matches(pattern: str, exact: bool, text: str) -> bool:
+    """Case-insensitive contains/exact match of ``text`` against ``pattern``."""
+    needle = pattern.strip().casefold()
+    if not needle:
+        return False
+    candidate = text.strip().casefold()
+    if exact:
+        return candidate == needle
+    return needle in candidate
+
+
 def matches(filter_rule: object, text: str) -> bool:
     """Case-insensitive contains/exact match against a saved pattern."""
-    pattern = filter_rule.pattern.strip().casefold()  # type: ignore[attr-defined]
-    candidate = text.strip().casefold()
-    if not pattern:
-        return False
-    if filter_rule.exact:  # type: ignore[attr-defined]
-        return candidate == pattern
-    return pattern in candidate
+    return text_matches(
+        filter_rule.pattern,  # type: ignore[attr-defined]
+        bool(filter_rule.exact),  # type: ignore[attr-defined]
+        text,
+    )
 
 
 async def delete_if_filtered(bot: object, event: object, text: str) -> bool:
@@ -127,12 +137,13 @@ async def delete_if_filtered(bot: object, event: object, text: str) -> bool:
     category=CATEGORY,
     sudo_only=True,
     aliases=("filters",),
-    usage="filter [-after | -before | -list | -clear | -off <text>] [-exact]",
+    usage="filter [-after | -before] [-exact] | filter -list | -clear | -off <text>",
     examples=(
         "filter",
-        "filter -exact",
         "filter -after",
+        "filter -exact",
         "filter -before",
+        "filter -exact -before",
         "filter -list",
         "filter -off <text>",
         "filter -clear",
@@ -141,10 +152,13 @@ async def delete_if_filtered(bot: object, event: object, text: str) -> bool:
 async def cmd_filter(ctx: Context) -> None:
     """Save a per-chat auto-delete filter from the replied message.
 
-    Reply to a message and send `filter`: every NEW message in this chat from
-    anyone whose text matches it is deleted automatically. Filters only ever
-    apply to the chat where they were created. `-after`/`-before` instead
-    delete the replied message plus everything after/before it, once.
+    Reply to a message and send `filter` (or `filter -after`): every NEW
+    message in this chat from anyone whose text contains it is deleted
+    automatically, going forward. `filter -before` instead scans this chat's
+    existing history and deletes every message whose text matches the replied
+    message; add `-exact` to only delete identical messages. Non-matching
+    messages are never touched, and filters only apply to the chat where they
+    were created.
     """
     ctx.require_single_dash_flags(*FLAGS)
     flags, off_words, stray = _parse_args(ctx.args)
@@ -154,17 +168,22 @@ async def cmd_filter(ctx: Context) -> None:
         raise UsageError(f"Pick one action.\nUsage: {USAGE}")
     if actions and stray:
         raise UsageError(f"Unexpected argument `{stray[0]}`.\nUsage: {USAGE}")
-    if flags & {"-after", "-before", "-list", "-clear"} and "-exact" in flags:
-        raise UsageError("`-exact` only applies to saving a filter.\nUsage: `filter [-exact]`")
+    if "-exact" in flags and flags & {"-list", "-clear", "-off"}:
+        raise UsageError(
+            "`-exact` only applies to saving a filter or history deletion.\n"
+            "Usage: `filter [-after | -before] [-exact]`"
+        )
 
     if "-list" in flags:
         await _list_filters(ctx)
     elif "-clear" in flags:
         await _clear_filters(ctx)
     elif "-after" in flags:
-        await _delete_history(ctx, after=True)
+        # "After" = the future: save a persistent filter for new messages.
+        await _save_filter(ctx, exact="-exact" in flags)
     elif "-before" in flags:
-        await _delete_history(ctx, after=False)
+        # "Before" = the history: one-shot sweep of matching existing messages.
+        await _delete_matching_history(ctx, exact="-exact" in flags)
     elif "-off" in flags:
         await _remove_filter(ctx, off_words)
     else:
@@ -208,10 +227,7 @@ async def _save_filter(ctx: Context, *, exact: bool) -> None:
             "Reply to the message whose text should become the filter.\n"
             f"Usage: {USAGE}"
         )
-    replied = await ctx.get_reply_message()
-    pattern = (
-        getattr(replied, "raw_text", None) or getattr(replied, "text", "") or ""
-    ).strip() if replied else ""
+    pattern = await _replied_text(ctx)
     if not pattern:
         raise ValidationError("The replied message has no text to filter.")
     if len(pattern) > MAX_PATTERN:
@@ -269,10 +285,7 @@ async def _remove_filter(ctx: Context, off_words: list[str]) -> None:
     pattern = " ".join(off_words).strip()
     if not pattern:
         if ctx.event.is_reply:
-            replied = await ctx.get_reply_message()
-            pattern = (
-                getattr(replied, "raw_text", None) or getattr(replied, "text", "") or ""
-            ).strip() if replied else ""
+            pattern = await _replied_text(ctx)
         if not pattern:
             raise UsageError("Usage: `filter -off <text>` (or reply to a filtered message)")
     removed = await ctx.db.remove_delete_filter(ctx.chat_id, pattern)
@@ -283,60 +296,75 @@ async def _remove_filter(ctx: Context, off_words: list[str]) -> None:
     await ctx.reply(f"✅ Removed filter `{truncate(pattern, 80)}`.")
 
 
-# -- one-shot history deletion (-after / -before) -----------------------------
+# -- one-shot history deletion (-before) --------------------------------------
 
 
-async def _delete_history(ctx: Context, *, after: bool) -> None:
+async def _delete_matching_history(ctx: Context, *, exact: bool) -> None:
+    """Delete every EXISTING message in this chat matching the replied text."""
     if not ctx.event.is_reply:
-        direction = "-after" if after else "-before"
         raise UsageError(
-            f"Reply to the message that anchors the deletion.\nUsage: `filter {direction}`"
+            "Reply to the message whose text should be matched.\n"
+            "Usage: `filter -before [-exact]`"
         )
-    replied = await ctx.get_reply_message()
-    target_id = getattr(replied, "id", None)
-    if not isinstance(target_id, int):
-        raise ValidationError("Could not determine the replied message.")
+    pattern = await _replied_text(ctx)
+    if not pattern:
+        raise ValidationError("The replied message has no text to match.")
 
-    direction = "after" if after else "before"
+    word = "is identical to" if exact else "contains"
     if not await ctx.bot.confirm(
         ctx.event,
         (
-            f"⚠️ Delete the replied message and every message **{direction}** it "
-            "in this chat? This cannot be undone."
+            f"⚠️ Scan this chat and delete every message whose text {word} "
+            f"`{truncate(pattern, 100)}`? Other messages are not touched. "
+            "This cannot be undone."
         ),
     ):
         await ctx.reply("👍 Cancelled.")
         return
 
-    deleted = await _delete_history_range(ctx, target_id, after=after)
+    deleted = await _delete_matching_range(ctx, pattern=pattern, exact=exact)
     if deleted == 0:
-        await ctx.reply("ℹ️ Nothing was deleted (no permission, or nothing to delete).")
+        await ctx.reply("ℹ️ Nothing matched in this chat.")
         return
-    span = "from it onward" if after else "up to and including it"
-    await ctx.respond(f"🗑 Deleted **{deleted}** message(s) {span}.")
+    scope = "identical to" if exact else "containing"
+    await ctx.respond(f"🗑 Deleted **{deleted}** message(s) {scope} the filter in this chat.")
 
 
-async def _delete_history_range(ctx: Context, target_id: int, *, after: bool) -> int:
-    """Delete an open-ended ID range in batches; returns how many were removed."""
+async def _replied_text(ctx: Context) -> str:
+    """The replied message's text, or an empty string when it has none."""
+    replied = await ctx.get_reply_message()
+    if not replied:
+        return ""
+    return (
+        getattr(replied, "raw_text", None) or getattr(replied, "text", "") or ""
+    ).strip()
+
+
+async def _delete_matching_range(ctx: Context, *, pattern: str, exact: bool) -> int:
+    """Sweep this chat, deleting only messages whose text matches.
+
+    Bounded at the command message so messages arriving mid-sweep are left
+    alone; everything older is scanned.
+    """
     deleted = 0
     batch: list[int] = []
-    # Telethon's forward iterator does `max(offset_id, max_id)` and would
-    # crash on `max_id=None`, so pass only the bound that exists. `min_id`
-    # is exclusive and `max_id` is applied as an offset, which yields
-    # exactly `message_id >= target_id` (after) / `<= target_id` (before);
-    # the explicit guards below protect against permissive doubles anyway.
+    command_id = getattr(ctx.event, "id", None)
+    # Telethon's forward iterator applies `max_id` as an offset (a None value
+    # would crash it), so only pass it when we have an integer command id.
     kwargs: dict[str, int] = (
-        {"min_id": target_id - 1} if after else {"max_id": target_id + 1}
+        {"max_id": command_id + 1} if isinstance(command_id, int) else {}
     )
     async for message in ctx.client.iter_messages(ctx.chat_id, limit=None, **kwargs):
         message_id = getattr(message, "id", None)
         if not isinstance(message_id, int):
             continue
-        # Explicit boundary guards protect against permissive test doubles and
-        # messages arriving while the deletion sweep is running.
-        if after and message_id < target_id:
+        # Guard against messages arriving while the sweep is running.
+        if isinstance(command_id, int) and message_id > command_id:
             continue
-        if not after and message_id > target_id:
+        text = (
+            getattr(message, "raw_text", None) or getattr(message, "text", "") or ""
+        )
+        if not text_matches(pattern, exact, text):
             continue
         batch.append(message_id)
         if len(batch) >= DELETE_BATCH:
