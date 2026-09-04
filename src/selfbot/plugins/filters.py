@@ -320,10 +320,13 @@ async def _delete_history_range(ctx: Context, target_id: int, *, after: bool) ->
     """Delete an open-ended ID range in batches; returns how many were removed."""
     deleted = 0
     batch: list[int] = []
-    kwargs: dict[str, int | None] = (
-        {"min_id": target_id - 1, "max_id": None}
-        if after
-        else {"min_id": 0, "max_id": target_id + 1}
+    # Telethon's forward iterator does `max(offset_id, max_id)` and would
+    # crash on `max_id=None`, so pass only the bound that exists. `min_id`
+    # is exclusive and `max_id` is applied as an offset, which yields
+    # exactly `message_id >= target_id` (after) / `<= target_id` (before);
+    # the explicit guards below protect against permissive doubles anyway.
+    kwargs: dict[str, int] = (
+        {"min_id": target_id - 1} if after else {"max_id": target_id + 1}
     )
     async for message in ctx.client.iter_messages(ctx.chat_id, limit=None, **kwargs):
         message_id = getattr(message, "id", None)
