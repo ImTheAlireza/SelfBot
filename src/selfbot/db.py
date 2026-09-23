@@ -125,6 +125,17 @@ class AutoReply:
 
 
 @dataclass(slots=True)
+class DeleteFilter:
+    """A per-chat auto-delete pattern saved from a replied message."""
+
+    chat_id: int
+    pattern: str
+    exact: bool = False  # False = contains, True = whole-message match
+    created_by: int | None = None
+    created_at: datetime | None = None
+
+
+@dataclass(slots=True)
 class Welcome:
     """A per-chat welcome message template."""
 
@@ -508,6 +519,16 @@ class Database:
                 )
                 """,
                 "CREATE INDEX IF NOT EXISTS idx_search_history_user ON search_history (user_id, created_at)",
+                """
+                CREATE TABLE IF NOT EXISTS delete_filters (
+                    chat_id INTEGER NOT NULL,
+                    pattern TEXT NOT NULL,
+                    exact INTEGER NOT NULL DEFAULT 0,
+                    created_by INTEGER,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (chat_id, pattern)
+                )
+                """,
             ]
         else:
             charset = "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
@@ -631,6 +652,16 @@ class Database:
                     is_saved BOOLEAN NOT NULL DEFAULT FALSE,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     INDEX idx_search_history_user (user_id, created_at)
+                ) {charset}
+                """,
+                f"""
+                CREATE TABLE IF NOT EXISTS delete_filters (
+                    chat_id BIGINT NOT NULL,
+                    pattern TEXT NOT NULL,
+                    exact BOOLEAN NOT NULL DEFAULT FALSE,
+                    created_by BIGINT DEFAULT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (chat_id, pattern(191))
                 ) {charset}
                 """,
             ]
@@ -822,6 +853,78 @@ class Database:
             rules,
             key=lambda rule: (rule.mode != "match", -len(rule.trigger), rule.trigger.casefold()),
         )
+
+    # -- delete filters ----------------------------------------------------
+
+    async def add_delete_filter(
+        self,
+        chat_id: int,
+        pattern: str,
+        *,
+        exact: bool = False,
+        created_by: int | None = None,
+    ) -> None:
+        """Save (or replace) a per-chat auto-delete pattern."""
+        pattern = pattern.strip()
+        await self.execute(
+            "DELETE FROM delete_filters WHERE chat_id = %s AND pattern = %s",
+            (chat_id, pattern),
+        )
+        await self.execute(
+            "INSERT INTO delete_filters (chat_id, pattern, exact, created_by) "
+            "VALUES (%s, %s, %s, %s)",
+            (chat_id, pattern, bool(exact), created_by),
+        )
+
+    async def remove_delete_filter(self, chat_id: int, pattern: str) -> int:
+        """Remove one saved pattern. Returns how many rows went away."""
+        return await self.execute(
+            "DELETE FROM delete_filters WHERE chat_id = %s AND pattern = %s",
+            (chat_id, pattern.strip()),
+        )
+
+    async def clear_delete_filters(self, chat_id: int) -> int:
+        """Remove every saved pattern in one chat. Returns the old count."""
+        return await self.execute(
+            "DELETE FROM delete_filters WHERE chat_id = %s",
+            (chat_id,),
+        )
+
+    async def list_all_delete_filters(self) -> list[DeleteFilter]:
+        """Return every delete filter across all chats."""
+        rows = await self.fetch_all(
+            "SELECT chat_id, pattern, exact, created_by, created_at "
+            "FROM delete_filters ORDER BY chat_id, pattern"
+        )
+        return [
+            DeleteFilter(
+                chat_id=int(row["chat_id"]),
+                pattern=row["pattern"],
+                exact=bool(row["exact"]),
+                created_by=row.get("created_by"),
+                created_at=_as_aware(row.get("created_at")),
+            )
+            for row in rows
+        ]
+
+    async def list_delete_filters(self, chat_id: int) -> list[DeleteFilter]:
+        rows = await self.fetch_all(
+            "SELECT chat_id, pattern, exact, created_by, created_at FROM delete_filters "
+            "WHERE chat_id = %s",
+            (chat_id,),
+        )
+        filters = [
+            DeleteFilter(
+                chat_id=int(row["chat_id"]),
+                pattern=row["pattern"],
+                exact=bool(row["exact"]),
+                created_by=row.get("created_by"),
+                created_at=_as_aware(row.get("created_at")),
+            )
+            for row in rows
+        ]
+        # Longest patterns first so the most specific rule wins the match scan.
+        return sorted(filters, key=lambda f: (-len(f.pattern), f.pattern.casefold()))
 
     # -- welcomes ----------------------------------------------------------
 
@@ -1491,6 +1594,9 @@ class Database:
             "auto_replies": (
                 "SELECT chat_id, mode, trigger_text, reply_text, "
                 "reply_condition, created_at FROM auto_replies"
+            ),
+            "delete_filters": (
+                "SELECT chat_id, pattern, exact, created_by, created_at FROM delete_filters"
             ),
             "welcomes": (
                 "SELECT chat_id, message, enabled, created_at FROM welcomes"
