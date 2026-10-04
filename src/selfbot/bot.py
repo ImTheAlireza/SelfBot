@@ -112,6 +112,11 @@ class SelfBot:
 
         self._auto_reply_cache: dict[int, list[Any]] = {}
         self._filter_cache: dict[int, list[Any]] = {}
+        # Mirror rules are cached on first use and invalidated by `autoforward`;
+        # the hop map remembers which messages this bot sent, so a rule pair
+        # like A→B and B→A cannot bounce a message back and forth forever.
+        self._auto_forward_cache: list[Any] | None = None
+        self._auto_forward_hops: dict[tuple[int, int], tuple[int, int, float]] = {}
         self._reaction_cache: dict[str, str] = {}
         self._reaction_cache_at = 0.0
         self._recent_welcomes: dict[tuple[int, int], float] = {}
@@ -424,6 +429,17 @@ class SelfBot:
     async def _handle_message(self, event: Any) -> None:
         self.metrics.incr("messages_seen")
         await self._maybe_react(event)
+
+        # Mirror new messages into every chat configured with `autoforward`.
+        # Runs before the text check below so media-only posts are mirrored too.
+        try:
+            from .plugins.forwarding import maybe_auto_forward
+
+            await maybe_auto_forward(self, event)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Unhandled error while auto-forwarding")
 
         # Real-time collision detection for active challenge sessions
         challenge_state = self.challenge_tasks.get(event.chat_id)
@@ -986,6 +1002,10 @@ class SelfBot:
             self._filter_cache.clear()
         else:
             self._filter_cache.pop(chat_id, None)
+
+    def invalidate_auto_forward_cache(self) -> None:
+        """Drop the cached mirror rules; the next message reloads them."""
+        self._auto_forward_cache = None
 
     def invalidate_reaction_cache(self) -> None:
         self._reaction_cache_at = 0.0

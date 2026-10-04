@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "AIMessage",
     "AIProvider",
+    "AutoForward",
     "AutoReply",
     "Database",
     "QuickReply",
@@ -133,6 +134,45 @@ class DeleteFilter:
     exact: bool = False  # False = contains, True = whole-message match
     created_by: int | None = None
     created_at: datetime | None = None
+
+
+@dataclass(slots=True)
+class AutoForward:
+    """A rule mirroring a source chat's new messages into another chat.
+
+    ``media_types`` is empty for "every message"; otherwise it lists the
+    canonical kinds (``photo``, ``audio``, …) the rule is limited to. Both
+    sides are marked chat IDs, so a channel is stored as ``-100…`` — exactly
+    the value Telethon puts in ``event.chat_id``.
+    """
+
+    dest_chat_id: int
+    source_key: str
+    source_id: int | None = None
+    source_title: str | None = None
+    source_username: str | None = None
+    media_types: tuple[str, ...] = ()
+    hide_sender: bool = False
+    enabled: bool = True
+    created_by: int | None = None
+    created_at: datetime | None = None
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> AutoForward:
+        raw = row.get("media_types") or ""
+        return cls(
+            dest_chat_id=int(row["dest_chat_id"]),
+            source_key=row["source_key"],
+            source_id=int(row["source_id"]) if row.get("source_id") else None,
+            source_title=row.get("source_title"),
+            source_username=row.get("source_username"),
+            media_types=tuple(part for part in (p.strip() for p in raw.split(",")) if part),
+            hide_sender=bool(row.get("hide_sender")),
+            enabled=bool(row.get("enabled", True)),
+            created_by=row.get("created_by"),
+            created_at=_as_aware(row.get("created_at")),
+        )
+
 
 
 @dataclass(slots=True)
@@ -529,6 +569,21 @@ class Database:
                     PRIMARY KEY (chat_id, pattern)
                 )
                 """,
+                """
+                CREATE TABLE IF NOT EXISTS auto_forwards (
+                    dest_chat_id INTEGER NOT NULL,
+                    source_key TEXT NOT NULL,
+                    source_id INTEGER,
+                    source_title TEXT,
+                    source_username TEXT,
+                    media_types TEXT NOT NULL DEFAULT '',
+                    hide_sender INTEGER NOT NULL DEFAULT 0,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    created_by INTEGER,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (dest_chat_id, source_key)
+                )
+                """,
             ]
         else:
             charset = "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
@@ -662,6 +717,21 @@ class Database:
                     created_by BIGINT DEFAULT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (chat_id, pattern(191))
+                ) {charset}
+                """,
+                f"""
+                CREATE TABLE IF NOT EXISTS auto_forwards (
+                    dest_chat_id BIGINT NOT NULL,
+                    source_key VARCHAR(191) NOT NULL,
+                    source_id BIGINT DEFAULT NULL,
+                    source_title VARCHAR(255) DEFAULT NULL,
+                    source_username VARCHAR(64) DEFAULT NULL,
+                    media_types VARCHAR(255) NOT NULL DEFAULT '',
+                    hide_sender BOOLEAN NOT NULL DEFAULT FALSE,
+                    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_by BIGINT DEFAULT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (dest_chat_id, source_key)
                 ) {charset}
                 """,
             ]
@@ -925,6 +995,112 @@ class Database:
         ]
         # Longest patterns first so the most specific rule wins the match scan.
         return sorted(filters, key=lambda f: (-len(f.pattern), f.pattern.casefold()))
+
+    # -- auto-forwards -----------------------------------------------------
+
+    _AUTO_FORWARD_COLUMNS = (
+        "dest_chat_id, source_key, source_id, source_title, source_username, "
+        "media_types, hide_sender, enabled, created_by, created_at"
+    )
+
+    async def set_auto_forward(
+        self,
+        dest_chat_id: int,
+        source_key: str,
+        *,
+        source_id: int | None = None,
+        source_title: str | None = None,
+        source_username: str | None = None,
+        media_types: Sequence[str] = (),
+        hide_sender: bool = False,
+        created_by: int | None = None,
+    ) -> None:
+        """Save (or replace) a mirror rule for one destination chat.
+
+        Re-adding an existing rule also re-enables it, so ``autoforward`` can
+        be used to fix a rule that was switched off with ``autoforward off``.
+        """
+        source_key = source_key.strip()
+        await self.execute(
+            "DELETE FROM auto_forwards WHERE dest_chat_id = %s AND source_key = %s",
+            (dest_chat_id, source_key),
+        )
+        await self.execute(
+            "INSERT INTO auto_forwards (dest_chat_id, source_key, source_id, source_title, "
+            "source_username, media_types, hide_sender, enabled, created_by) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (
+                dest_chat_id,
+                source_key,
+                source_id,
+                source_title,
+                source_username,
+                ",".join(media_types),
+                bool(hide_sender),
+                True,
+                created_by,
+            ),
+        )
+
+    async def get_auto_forward(
+        self, dest_chat_id: int, source_key: str
+    ) -> AutoForward | None:
+        row = await self.fetch_one(
+            f"SELECT {self._AUTO_FORWARD_COLUMNS} FROM auto_forwards "
+            "WHERE dest_chat_id = %s AND source_key = %s",
+            (dest_chat_id, source_key.strip()),
+        )
+        return AutoForward.from_row(row) if row else None
+
+    async def set_auto_forward_enabled(
+        self, dest_chat_id: int, source_key: str, enabled: bool
+    ) -> int:
+        """Toggle one rule. Returns affected rows (0 = no such rule)."""
+        return await self.execute(
+            "UPDATE auto_forwards SET enabled = %s "
+            "WHERE dest_chat_id = %s AND source_key = %s",
+            (1 if enabled else 0, dest_chat_id, source_key.strip()),
+        )
+
+    async def set_all_auto_forwards_enabled(self, dest_chat_id: int, enabled: bool) -> int:
+        """Toggle every rule of one destination chat (used by `autoforward off`)."""
+        return await self.execute(
+            "UPDATE auto_forwards SET enabled = %s WHERE dest_chat_id = %s",
+            (1 if enabled else 0, dest_chat_id),
+        )
+
+    async def delete_auto_forward(self, dest_chat_id: int, source_key: str) -> int:
+        return await self.execute(
+            "DELETE FROM auto_forwards WHERE dest_chat_id = %s AND source_key = %s",
+            (dest_chat_id, source_key.strip()),
+        )
+
+    async def delete_all_auto_forwards(self, dest_chat_id: int) -> int:
+        return await self.execute(
+            "DELETE FROM auto_forwards WHERE dest_chat_id = %s", (dest_chat_id,)
+        )
+
+    async def list_auto_forwards(self, dest_chat_id: int) -> list[AutoForward]:
+        rows = await self.fetch_all(
+            f"SELECT {self._AUTO_FORWARD_COLUMNS} FROM auto_forwards "
+            "WHERE dest_chat_id = %s ORDER BY source_key",
+            (dest_chat_id,),
+        )
+        return [AutoForward.from_row(row) for row in rows]
+
+    async def list_all_auto_forwards(self) -> list[AutoForward]:
+        rows = await self.fetch_all(
+            f"SELECT {self._AUTO_FORWARD_COLUMNS} FROM auto_forwards "
+            "ORDER BY dest_chat_id, source_key"
+        )
+        return [AutoForward.from_row(row) for row in rows]
+
+    async def list_enabled_auto_forwards(self) -> list[AutoForward]:
+        """Every switched-on rule — what the new-message watcher loads."""
+        rows = await self.fetch_all(
+            f"SELECT {self._AUTO_FORWARD_COLUMNS} FROM auto_forwards WHERE enabled = 1"
+        )
+        return [AutoForward.from_row(row) for row in rows]
 
     # -- welcomes ----------------------------------------------------------
 
@@ -1600,6 +1776,11 @@ class Database:
             ),
             "welcomes": (
                 "SELECT chat_id, message, enabled, created_at FROM welcomes"
+            ),
+            "auto_forwards": (
+                "SELECT dest_chat_id, source_key, source_id, source_title, "
+                "source_username, media_types, hide_sender, enabled, created_by, "
+                "created_at FROM auto_forwards"
             ),
             "timers": (
                 "SELECT hash, user_id, chat_id, title, duration_seconds, "

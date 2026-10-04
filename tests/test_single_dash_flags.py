@@ -23,6 +23,8 @@ from conftest import FakeEvent, FakeMessage
         ("plugin install https://example.com/repo.git --trust", False),
         ('setautoreply contain "hello" "hi" --nr', False),
         ("remautoreply --allchats", False),
+        ("autoforward @channel --music", False),
+        ("autoforward @channel --hide", False),
         ("search invoice --here", False),
         ("stick --save hello", False),
         ("qr hello --size 5", False),

@@ -145,6 +145,10 @@ class FakeClient:
         self.entities: dict[Any, Any] = {}
         self.admin_log_results: list[Any] = []
         self.admin_log_requests: list[Any] = []
+        self.forwarded: list[dict[str, Any]] = []
+        #: When set, forward_messages raises it (e.g. a restricted chat).
+        self.forward_error: Exception | None = None
+        self._forwarded_ids = 7000
 
     async def __call__(self, request: Any) -> Any:
         self.admin_log_requests.append(request)
@@ -157,6 +161,14 @@ class FakeClient:
     async def send_file(self, chat_id: Any, file: Any, **kwargs: Any) -> FakeMessage:
         self.sent_files.append({"chat_id": chat_id, "file": file, **kwargs})
         return FakeMessage(id=7777)
+
+    async def forward_messages(self, chat_id: Any, messages: Any, **kwargs: Any) -> Any:
+        if self.forward_error is not None:
+            raise self.forward_error
+        self.forwarded.append({"chat_id": chat_id, "messages": messages, **kwargs})
+        self._forwarded_ids += 1
+        sent = FakeMessage(id=self._forwarded_ids)
+        return [sent] if isinstance(messages, (list, tuple)) else sent
 
     async def send_message(self, chat_id: Any, text: str, **_kwargs: Any) -> FakeMessage:
         self.sent_messages.append((chat_id, text))
@@ -207,6 +219,9 @@ class FakeBot:
         self.auto_reply_cache_invalidated: list[int | None] = []
         self._filter_cache: dict[int, list[Any]] = {}
         self.filter_cache_invalidated: list[int | None] = []
+        self._auto_forward_cache: list[Any] | None = None
+        self._auto_forward_hops: dict[tuple[int, int], tuple[int, int, float]] = {}
+        self.auto_forward_cache_invalidated = 0
         self.reaction_cache_invalidated = False
 
     def is_sudo(self, event: Any) -> bool:
@@ -240,6 +255,10 @@ class FakeBot:
             self._filter_cache.clear()
         else:
             self._filter_cache.pop(chat_id, None)
+
+    def invalidate_auto_forward_cache(self) -> None:
+        self.auto_forward_cache_invalidated += 1
+        self._auto_forward_cache = None
 
     def invalidate_reaction_cache(self) -> None:
         self.reaction_cache_invalidated = True

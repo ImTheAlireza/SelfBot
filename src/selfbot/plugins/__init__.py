@@ -22,6 +22,7 @@ PRELUDE = (
     "ai",
     "messaging",
     "filters",
+    "forwarding",
     "files",
     "timers",
     "utilities",

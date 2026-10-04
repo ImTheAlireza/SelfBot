@@ -25,6 +25,7 @@ BACKUP_SECTIONS = (
     "auto_replies",
     "delete_filters",
     "welcomes",
+    "auto_forwards",
     "timers",
     "sticker_packs",
     "app_settings",
@@ -235,6 +236,29 @@ async def _import_dump(ctx: Context, data: dict[str, Any]) -> dict[str, int]:
             counts["welcomes"] += 1
         except Exception:
             logger.debug("Could not import welcome %s", row, exc_info=True)
+
+    # Auto-forwards: mirror rules keep their source and media-type filters.
+    for row in data.get("auto_forwards", []) or []:
+        try:
+            dest_chat_id = int(row["dest_chat_id"])
+            source_key = row["source_key"]
+            await db.set_auto_forward(
+                dest_chat_id,
+                source_key,
+                source_id=row.get("source_id"),
+                source_title=row.get("source_title"),
+                source_username=row.get("source_username"),
+                media_types=[
+                    part for part in (row.get("media_types") or "").split(",") if part
+                ],
+                hide_sender=bool(row.get("hide_sender")),
+                created_by=row.get("created_by"),
+            )
+            if not bool(row.get("enabled", True)):
+                await db.set_auto_forward_enabled(dest_chat_id, source_key, False)
+            counts["auto_forwards"] += 1
+        except Exception:
+            logger.debug("Could not import auto forward %s", row, exc_info=True)
 
     # Timers: only import active ones; do not clobber existing hashes.
     from ..db import Timer
