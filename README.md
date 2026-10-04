@@ -20,7 +20,7 @@
 
 ## What it does
 
-59 commands across AI, file manipulation, timers, stickers, QR codes, weather,
+61 commands across AI, file manipulation, timers, stickers, QR codes, weather,
 dictionaries, search, backups and chat automation — all driven from your own
 Telegram account by typing commands into any chat.
 
@@ -31,7 +31,7 @@ Telegram account by typing commands into any chat.
 | ⏰ **Timers** | Live-updating countdowns that survive restarts. |
 | 🎨 **Stickers** | Render text to stickers and manage packs via a helper bot. |
 | 🔲 **Utilities** | QR generate/decode, text→PDF (English + Persian), weather, dictionary with audio, IRR exchange rates. |
-| ⚡ **Automation** | Quick-reply shortcuts, per-channel auto-reactions, per-chat auto-replies, per-chat welcome messages, controlled bulk deletion. |
+| ⚡ **Automation** | Quick-reply shortcuts, per-channel auto-reactions, per-chat auto-replies, per-chat welcome messages, per-chat auto-forwarding, controlled bulk deletion. |
 | 🔍 **Search & data** | Search chat history by text/sender/date/media, and export/import backups of settings, quick replies, timers and more. |
 | 🧩 **Plugins** | Drop Python modules into a plugins directory to add commands without touching the core. |
 | 🩺 **Observability** | In-chat health report (tasks, memory, DB, API failures) and an optional `/healthz` endpoint. |
@@ -257,6 +257,7 @@ Durations: `90`, `15:30`, `1:15:30`, `2:12:15:30`, or `1h30m`.
 ### Automation & Stickers
 | Command | Description |
 |---|---|
+| `autoforward <source> [-type ...] [-hide]` | 👑 Mirror every new message from a channel, group or user into this chat (`list`, `on`, `off`, `remove` to manage) |
 | `setautoreply <contain\|match> "input" "reply"` | 👑 Auto-reply in the current chat only (`contain` is whole-word aware) |
 | `remautoreply <contain\|match> "input"` / `autoreplylist` | 👑 Manage per-chat auto-replies |
 | `selfwlc <set\|on\|off\|list\|clear> [-all]` | 👑 Welcome new members with a saved per-chat message (`[name]`, `[nametag]`, `[username]` and `[[username]/[nametag]]` tags; Persian supported) |
@@ -268,6 +269,42 @@ Durations: `90`, `15:30`, `1:15:30`, `2:12:15:30`, or `1h30m`.
 | `stickerpack create\|open\|list\|close\|delete` | Manage packs |
 
 👑 = owner only.
+
+#### Auto-forwarding
+
+Type `autoforward @channel -music` **in the chat that should receive the
+messages** and every new post from `@channel` is mirrored there. The source can
+be a channel, a group, a bot or a person, given as `@username`, a `t.me` link,
+a numeric chat id (negative ids included, e.g. `-1001234567890`) or `me` for
+Saved Messages. Names are resolved when the rule is created, so a typo is
+reported immediately instead of silently mirroring nothing.
+
+Rules are per destination chat: the same source can feed several chats, each
+with its own filters, and they survive restarts. Only messages that arrive
+*after* the rule exists are mirrored — nothing is copied retroactively.
+
+```text
+autoforward @music_channel -music            # only audio messages
+autoforward @news -photo -video              # photos and videos only
+autoforward @group -hide                     # copy without "Forwarded from"
+autoforward list                             # rules of this chat (-all = every chat)
+autoforward off @music_channel               # pause it (no source = every rule here)
+autoforward on @music_channel                # resume it
+autoforward remove @music_channel            # delete it (remove -all for all of them)
+```
+
+Without flags every new message is mirrored. With flags the rule is limited to
+exactly those kinds — `-text`, `-photo`, `-video`, `-voice`, `-videomsg`,
+`-music`, `-file`, `-sticker`, `-gif`, `-link` (plural spellings also work, so
+`-musics` matches `del musics`). By default a real forward is sent, keeping the
+original source visible; `-hide` sends a copy instead, which carries no
+"Forwarded from" header and works even for chats that forbid forwarding. Copies
+are delivered by file reference, so Telegram does not re-upload anything.
+
+A mirrored message never travels back to the chat it came from, so a rule pair
+such as `A→B` plus `B→A` cannot loop (chains up to a few hops still work).
+Media albums are mirrored message by message, and edits made at the source
+afterwards are not re-mirrored.
 
 ---
 
@@ -344,7 +381,7 @@ Manage them in chat: `plugin list`, `plugin load <path>`, `plugin reload <name>`
 ```bash
 pip install -e ".[dev,full]"
 
-pytest                      # 491 tests
+pytest                      # 547 tests
 pytest --cov=selfbot        # with coverage
 ruff check src tests        # lint
 mypy src/selfbot            # type check

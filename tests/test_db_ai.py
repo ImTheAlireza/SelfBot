@@ -174,6 +174,7 @@ async def test_export_rows_includes_all_sections(encrypted_db: Database) -> None
         "quick_replies",
         "auto_replies",
         "welcomes",
+        "auto_forwards",
         "timers",
         "sticker_packs",
         "app_settings",

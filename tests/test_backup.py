@@ -63,6 +63,14 @@ async def test_import_roundtrip(bot, tmp_path) -> None:
     await db.set_welcome_enabled(-100, True)
     await db.add_admin(999, "someone")
     await db.set_setting("ai.default_model", "gpt-x")
+    await db.set_auto_forward(
+        -100200,
+        "@music",
+        source_id=-100555,
+        source_title="Music Channel",
+        media_types=("audio", "video"),
+        hide_sender=True,
+    )
 
     src_ctx = _Ctx(bot=bot, event=FakeEvent(), db=db)
     dump = await _build_dump(src_ctx, include_secrets=True)
@@ -79,6 +87,7 @@ async def test_import_roundtrip(bot, tmp_path) -> None:
     assert counts["quick_replies"] >= 1
     assert counts["channel_reactions"] >= 1
     assert counts["welcomes"] >= 1
+    assert counts["auto_forwards"] >= 1
     assert counts["users"] >= 1
     assert counts["app_settings"] >= 1
 
@@ -88,6 +97,10 @@ async def test_import_roundtrip(bot, tmp_path) -> None:
     welcome = await new_db.get_welcome(-100)
     assert welcome is not None and welcome.message == "hi there" and welcome.enabled
     assert await new_db.get_setting("ai.default_model") == "gpt-x"
+    rule = await new_db.get_auto_forward(-100200, "@music")
+    assert rule is not None
+    assert rule.media_types == ("audio", "video")
+    assert rule.hide_sender is True and rule.source_id == -100555
     await new_db.close()
     bot.db = db
 
